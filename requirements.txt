@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+python-multipart
+torch
+torchaudio
+funasr
+reportlab

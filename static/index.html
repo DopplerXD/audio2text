@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>本地音频转文字</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">A2T</span>
+        <div>
+          <h1>本地音频转文字</h1>
+          <span class="version">v1.2 · FunASR Paraformer Studio</span>
+        </div>
+      </div>
+      <div class="top-meta">
+        <span>输出目录：<code id="outputDir">outputs/</code></span>
+        <span id="backendStatus" class="status idle">空闲</span>
+      </div>
+    </header>
+
+    <main class="layout">
+      <aside class="sidebar">
+        <section class="panel">
+          <h2>导入与配置</h2>
+          <label class="dropzone" id="dropzone">
+            <input id="fileInput" type="file" accept=".mp3,.m4a,.wav,.aac,.flac,.mp4,.mov,.mkv" />
+            <span class="drop-icon">+</span>
+            <span id="fileLabel">拖拽或点击选择音频/视频</span>
+            <small>MP3 · M4A · WAV · MP4 · MOV · MKV</small>
+          </label>
+          <dl class="file-meta">
+            <div><dt>文件名</dt><dd id="selectedName">-</dd></div>
+            <div><dt>大小</dt><dd id="selectedSize">-</dd></div>
+            <div><dt>类型</dt><dd id="selectedType">-</dd></div>
+          </dl>
+
+          <label>
+            语言
+            <select id="languageSelect" disabled>
+              <option value="zh">中文</option>
+            </select>
+          </label>
+
+          <label>
+            识别模型
+            <select id="modelSelect" disabled>
+              <option value="funasr-paraformer-zh">Paraformer-zh 中文离线识别</option>
+            </select>
+          </label>
+
+          <label class="check-row legacy-hidden">
+            <input id="wordTimestamps" type="checkbox" />
+            <span>词级时间戳</span>
+          </label>
+
+          <button id="transcribeBtn" class="primary">开始识别</button>
+          <p id="message" class="message"></p>
+        </section>
+
+        <section class="panel history-panel">
+          <div class="section-title">
+            <h2>历史记录</h2>
+            <button id="refreshBtn" class="ghost">刷新</button>
+          </div>
+          <div id="historyList" class="history-list"></div>
+        </section>
+      </aside>
+
+      <section class="main-panel">
+        <div class="record-header">
+          <div>
+            <h2 id="recordTitle">暂无记录</h2>
+            <p id="recordSub">上传文件后显示识别结果</p>
+          </div>
+          <span id="recordStatus" class="status idle">空闲</span>
+        </div>
+
+        <div class="tabs">
+          <button class="tab active" data-tab="text">完整文本</button>
+          <button class="tab" data-tab="segments">字幕分段</button>
+          <button class="tab" data-tab="exports">导出结果</button>
+        </div>
+
+        <section id="tab-text" class="tab-panel active">
+          <div class="toolbar">
+            <span id="textStats">字数 0 · 分段 0 · 语言 -</span>
+            <button id="saveTextBtn">保存修改</button>
+          </div>
+          <textarea id="textEditor" placeholder="识别完成后可在这里编辑完整文本"></textarea>
+        </section>
+
+        <section id="tab-segments" class="tab-panel">
+          <div class="toolbar">
+            <span>修改分段文本后点击保存</span>
+            <button id="saveSegmentsBtn">保存分段</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>开始</th>
+                  <th>结束</th>
+                  <th>内容</th>
+                </tr>
+              </thead>
+              <tbody id="segmentsBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="tab-exports" class="tab-panel">
+          <div class="export-actions">
+            <button data-export="txt">TXT</button>
+            <button data-export="md">Markdown</button>
+            <button data-export="pdf">PDF</button>
+            <button data-export="srt">SRT</button>
+            <button data-export="vtt">VTT</button>
+            <button data-export="json">JSON</button>
+            <button id="exportAllBtn" class="primary">全部 ZIP</button>
+          </div>
+          <div id="exportList" class="export-list"></div>
+        </section>
+      </section>
+
+      <aside class="info-panel">
+        <h2>文件与路径</h2>
+        <dl id="infoList" class="info-list"></dl>
+      </aside>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
