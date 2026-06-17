@@ -23,3 +23,5 @@ test_data/
 .ruff_cache/
 .coverage
 htmlcov/
+
+docs/
