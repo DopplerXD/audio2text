@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from io import BytesIO
 import tempfile
 import unittest
 import sqlite3
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -204,6 +206,106 @@ class StorageAndAPITests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         review_text.assert_called_once_with("我用 Kafka。")
 
+    @patch("api.ai_service.review_text")
+    def test_review_resolves_and_persists_selected_source_version(self, review_text):
+        organized = storage.add_ai_run(
+            "record-1",
+            stage="organize",
+            source_text="呃，我用卡芙卡。",
+            result_text="我用 Kafka。",
+        )
+        review_text.return_value = ([], {"issues": []})
+        response = self.client.post(
+            "/api/transcriptions/record-1/ai/review",
+            json={
+                "source_version_id": f"organize:{organized.id}",
+                "text": "这段客户端文本不应覆盖所选版本。",
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        run = response.json()["run"]
+        self.assertEqual(run["source_text"], "我用 Kafka。")
+        self.assertEqual(run["options"]["source_version_id"], f"organize:{organized.id}")
+        review_text.assert_called_once_with("我用 Kafka。")
+
+    def test_review_draft_diff_uses_immutable_check_source(self):
+        review = storage.add_ai_run(
+            "record-1",
+            stage="review",
+            source_text="我用卡芙卡处理消息。",
+            result_text="我用卡芙卡处理消息。",
+            result={"issues": []},
+        )
+        storage.update_ai_run(
+            int(review.id or 0),
+            result_text="我使用 Kafka 处理消息。",
+            result={"issues": []},
+        )
+
+        response = self.client.post(
+            f"/api/transcriptions/record-1/ai/reviews/{review.id}/diff",
+            json={"text": "我通过 Kafka 处理消息。"},
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        diff = response.json()
+        self.assertEqual("".join(chunk["left_text"] for chunk in diff["chunks"]), "我通过 Kafka 处理消息。")
+        self.assertEqual("".join(chunk["right_text"] for chunk in diff["chunks"]), "我用卡芙卡处理消息。")
+        self.assertTrue(any(chunk["type"] == "replace" for chunk in diff["chunks"]))
+
+    def test_review_draft_diff_allows_empty_text(self):
+        review = storage.add_ai_run(
+            "record-1",
+            stage="review",
+            source_text="需要全部删除的内容",
+            result_text="需要全部删除的内容",
+        )
+
+        response = self.client.post(
+            f"/api/transcriptions/record-1/ai/reviews/{review.id}/diff",
+            json={"text": ""},
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        diff = response.json()
+        self.assertEqual("".join(chunk["left_text"] for chunk in diff["chunks"]), "")
+        self.assertEqual("".join(chunk["right_text"] for chunk in diff["chunks"]), "需要全部删除的内容")
+        self.assertGreater(diff["counts"]["removed_chars"], 0)
+
+    def test_review_draft_diff_rejects_wrong_record_and_stage(self):
+        organized = storage.add_ai_run(
+            "record-1",
+            stage="organize",
+            source_text="原始正文",
+            result_text="整理正文",
+        )
+        storage.create_record(
+            record_id="record-2",
+            original_filename="other.wav",
+            original_path="/tmp/other.wav",
+            output_dir="/tmp/other-output",
+            model_mode="quality",
+            model_name="paraformer",
+        )
+        foreign_review = storage.add_ai_run(
+            "record-2",
+            stage="review",
+            source_text="其他记录正文",
+            result_text="其他记录正文",
+        )
+
+        wrong_stage = self.client.post(
+            f"/api/transcriptions/record-1/ai/reviews/{organized.id}/diff",
+            json={"text": "编辑正文"},
+        )
+        wrong_record = self.client.post(
+            f"/api/transcriptions/record-1/ai/reviews/{foreign_review.id}/diff",
+            json={"text": "编辑正文"},
+        )
+
+        self.assertEqual(wrong_stage.status_code, 404)
+        self.assertEqual(wrong_record.status_code, 404)
+
     @patch("api.ai_service.organize_text")
     def test_organize_default_creates_copy_without_changing_record(self, organize_text):
         organized_segments = [Segment(id=0, start=0, end=3, text="我用 Kafka。")]
@@ -245,6 +347,94 @@ class StorageAndAPITests(unittest.TestCase):
         self.assertEqual(payload["record"]["segments"][0]["text"], "我用 Kafka。")
         self.assertEqual({item["format"] for item in payload["export_files"]}, {"ai-srt", "ai-vtt"})
 
+    def test_selected_export_download_includes_manual_and_ai_files(self):
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        manual_path = self.output_dir / "interview.txt"
+        ai_path = self.output_dir / "interview-智能整理-1.txt"
+        manual_path.write_text("原始导出", encoding="utf-8")
+        ai_path.write_text("AI 整理结果", encoding="utf-8")
+        manual_file = storage.add_export_file("record-1", "txt", manual_path)
+        duplicate_manual_file = storage.add_export_file("record-1", "txt", manual_path)
+        ai_file = storage.add_export_file("record-1", "ai-txt", ai_path)
+
+        response = self.client.post(
+            "/api/transcriptions/record-1/exports/download",
+            json={"file_ids": [manual_file.id, duplicate_manual_file.id, ai_file.id]},
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers["content-type"], "application/zip")
+        with zipfile.ZipFile(BytesIO(response.content)) as archive:
+            self.assertEqual(
+                set(archive.namelist()),
+                {manual_path.name, "interview-2.txt", ai_path.name},
+            )
+            self.assertEqual(archive.read(manual_path.name).decode("utf-8"), "原始导出")
+            self.assertEqual(archive.read("interview-2.txt").decode("utf-8"), "原始导出")
+            self.assertEqual(archive.read(ai_path.name).decode("utf-8"), "AI 整理结果")
+
+    def test_export_delete_keeps_shared_file_until_last_reference(self):
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        shared_path = self.output_dir / "shared.txt"
+        shared_path.write_text("共享内容", encoding="utf-8")
+        first = storage.add_export_file("record-1", "txt", shared_path)
+        second = storage.add_export_file("record-1", "txt", shared_path)
+
+        first_response = self.client.post(
+            "/api/transcriptions/record-1/exports/delete",
+            json={"file_ids": [first.id]},
+        )
+        self.assertEqual(first_response.status_code, 200, first_response.text)
+        self.assertTrue(shared_path.exists())
+        self.assertIsNone(storage.get_export_file(int(first.id or 0)))
+        self.assertIsNotNone(storage.get_export_file(int(second.id or 0)))
+        self.assertTrue(first_response.json()["retained_shared_paths"])
+
+        second_response = self.client.post(
+            "/api/transcriptions/record-1/exports/delete",
+            json={"file_ids": [second.id]},
+        )
+        self.assertEqual(second_response.status_code, 200, second_response.text)
+        self.assertFalse(shared_path.exists())
+        self.assertIsNone(storage.get_export_file(int(second.id or 0)))
+
+    def test_export_batch_operations_validate_ownership_and_safe_path(self):
+        storage.create_record(
+            record_id="record-2",
+            original_filename="other.wav",
+            original_path="/tmp/other.wav",
+            output_dir=str(Path(self.temp_dir.name) / "other-output"),
+            model_mode="quality",
+            model_name="paraformer",
+        )
+        foreign_path = Path(self.temp_dir.name) / "other-output" / "foreign.txt"
+        foreign_path.parent.mkdir(parents=True, exist_ok=True)
+        foreign_path.write_text("其他记录", encoding="utf-8")
+        foreign_file = storage.add_export_file("record-2", "txt", foreign_path)
+
+        foreign_response = self.client.post(
+            "/api/transcriptions/record-1/exports/download",
+            json={"file_ids": [foreign_file.id]},
+        )
+        self.assertEqual(foreign_response.status_code, 404)
+
+        outside_path = Path(self.temp_dir.name) / "outside.txt"
+        outside_path.write_text("输出目录外文件", encoding="utf-8")
+        outside_file = storage.add_export_file("record-1", "txt", outside_path)
+        unsafe_response = self.client.post(
+            "/api/transcriptions/record-1/exports/delete",
+            json={"file_ids": [outside_file.id]},
+        )
+        self.assertEqual(unsafe_response.status_code, 400)
+        self.assertTrue(outside_path.exists())
+        self.assertIsNotNone(storage.get_export_file(int(outside_file.id or 0)))
+
+        empty_response = self.client.post(
+            "/api/transcriptions/record-1/exports/delete",
+            json={"file_ids": []},
+        )
+        self.assertEqual(empty_response.status_code, 400)
+
     @patch("api.ai_service.review_text")
     def test_review_edit_resolves_marker(self, review_text):
         issue = {
@@ -270,6 +460,53 @@ class StorageAndAPITests(unittest.TestCase):
         )
         self.assertEqual(updated.status_code, 200, updated.text)
         self.assertTrue(updated.json()["run"]["result"]["issues"][0]["resolved"])
+
+    def test_review_manual_result_can_be_saved_and_exported(self):
+        review = storage.add_ai_run(
+            "record-1",
+            stage="review",
+            source_text="我用卡芙卡处理消息。",
+            result_text="我用卡芙卡处理消息。",
+            result={"issues": []},
+        )
+        saved = self.client.patch(
+            f"/api/transcriptions/record-1/ai/reviews/{review.id}",
+            json={"text": "我使用 Kafka 处理消息。", "resolved_issue_ids": []},
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+        self.assertEqual(saved.json()["run"]["result_text"], "我使用 Kafka 处理消息。")
+
+        exported = self.client.post(
+            f"/api/transcriptions/record-1/ai/reviews/{review.id}/exports",
+            json={"format": "txt"},
+        )
+        self.assertEqual(exported.status_code, 200, exported.text)
+        payload = exported.json()
+        self.assertEqual(payload["export_file"]["format"], "ai-review-txt")
+        export_path = Path(payload["export_file"]["absolute_path"])
+        self.assertTrue(export_path.exists())
+        self.assertEqual(export_path.read_text(encoding="utf-8"), "我使用 Kafka 处理消息。\n")
+        self.assertIn(payload["export_file"]["id"], payload["run"]["result"]["export_file_ids"])
+        self.assertEqual(payload["record"]["text"], "呃，我用卡芙卡。")
+
+    def test_review_export_validates_format_and_run_ownership(self):
+        review = storage.add_ai_run(
+            "record-1",
+            stage="review",
+            source_text="送检内容",
+            result_text="已保存内容",
+        )
+        invalid_format = self.client.post(
+            f"/api/transcriptions/record-1/ai/reviews/{review.id}/exports",
+            json={"format": "srt"},
+        )
+        wrong_record = self.client.post(
+            f"/api/transcriptions/missing/ai/reviews/{review.id}/exports",
+            json={"format": "txt"},
+        )
+
+        self.assertEqual(invalid_format.status_code, 400)
+        self.assertEqual(wrong_record.status_code, 404)
 
     @patch("api.ai_service.analyze_text")
     def test_backend_interview_analysis_is_persisted(self, analyze_text):
