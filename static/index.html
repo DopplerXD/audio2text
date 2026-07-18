@@ -5,7 +5,22 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
     <title>本地音频转文字</title>
-    <link rel="stylesheet" href="/static/styles.css?v=1.4.6" />
+    <script>
+      (() => {
+        const storageKey = "audio2text-theme";
+        let preference = "system";
+        try {
+          const saved = localStorage.getItem(storageKey);
+          if (["light", "dark", "system"].includes(saved)) preference = saved;
+        } catch (_) {}
+        const resolved = preference === "system"
+          ? (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")
+          : preference;
+        document.documentElement.dataset.theme = resolved;
+        document.documentElement.dataset.themePreference = preference;
+      })();
+    </script>
+    <link rel="stylesheet" href="/static/styles.css?v=1.5.0" />
   </head>
   <body>
     <header class="topbar">
@@ -13,10 +28,19 @@
         <span class="brand-mark" aria-hidden="true">A2T</span>
         <div>
           <h1>本地音频转文字</h1>
-          <span class="version">v1.4 · FunASR + DeepSeek 智能处理</span>
+          <span class="version">v1.5 · FunASR + DeepSeek 智能处理</span>
         </div>
       </div>
       <div class="top-meta">
+        <label class="theme-picker" for="themeSelect">
+          <span class="theme-picker-icon" aria-hidden="true">◐</span>
+          <span class="visually-hidden">界面主题</span>
+          <select id="themeSelect" aria-label="界面主题">
+            <option value="system">跟随系统</option>
+            <option value="light">浅色</option>
+            <option value="dark">深色</option>
+          </select>
+        </label>
         <span>输出目录：<code id="outputDir">outputs/</code></span>
         <span id="aiStatus" class="status idle">AI 检查中</span>
         <span id="backendStatus" class="status idle">空闲</span>
@@ -372,6 +396,6 @@
       </form>
     </dialog>
 
-    <script src="/static/app.js?v=1.4.6"></script>
+    <script src="/static/app.js?v=1.5.0"></script>
   </body>
 </html>

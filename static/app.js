@@ -40,9 +40,47 @@ const EXPORT_FORMAT_LABELS = {
 };
 
 const REVIEW_EXPORT_FORMATS = new Set(["txt", "md", "pdf", "json"]);
+const THEME_STORAGE_KEY = "audio2text-theme";
+const THEME_VALUES = new Set(["light", "dark", "system"]);
+const systemThemeQuery = window.matchMedia("(prefers-color-scheme: dark)");
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
+
+function savedThemePreference() {
+  try {
+    const saved = localStorage.getItem(THEME_STORAGE_KEY);
+    return THEME_VALUES.has(saved) ? saved : "system";
+  } catch (_) {
+    return "system";
+  }
+}
+
+function applyTheme(preference, { persist = false } = {}) {
+  const normalized = THEME_VALUES.has(preference) ? preference : "system";
+  const resolved = normalized === "system" ? (systemThemeQuery.matches ? "dark" : "light") : normalized;
+  document.documentElement.dataset.theme = resolved;
+  document.documentElement.dataset.themePreference = normalized;
+  document.documentElement.style.colorScheme = resolved;
+  const select = $("#themeSelect");
+  if (select) select.value = normalized;
+  if (persist) {
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, normalized);
+    } catch (_) {}
+  }
+}
+
+function handleSystemThemeChange() {
+  if (document.documentElement.dataset.themePreference === "system") applyTheme("system");
+}
+
+function setupTheme() {
+  applyTheme(savedThemePreference());
+  $("#themeSelect").addEventListener("change", (event) => applyTheme(event.target.value, { persist: true }));
+  if (systemThemeQuery.addEventListener) systemThemeQuery.addEventListener("change", handleSystemThemeChange);
+  else systemThemeQuery.addListener?.(handleSystemThemeChange);
+}
 
 function setMessage(text, isError = false) {
   const message = $("#message");
@@ -1484,6 +1522,7 @@ async function exportAll() {
 }
 
 function setupEvents() {
+  setupTheme();
   $("#fileInput").addEventListener("change", (event) => {
     state.selectedFile = event.target.files[0] || null;
     renderSelectedFile();
