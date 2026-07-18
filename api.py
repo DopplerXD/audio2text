@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import shutil
+import tempfile
 import time
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 
 import audio_utils
 import ai_service
@@ -34,6 +37,7 @@ from transcriber import resolve_model, transcribe_audio
 
 
 router = APIRouter(prefix="/api")
+REVIEW_EXPORT_FORMATS = {"txt", "md", "pdf", "json"}
 
 
 def _http_error(exc: Exception, status_code: int = 400) -> HTTPException:
@@ -50,6 +54,13 @@ def _record_or_404(record_id: str):
     if record is None:
         raise HTTPException(status_code=404, detail="记录不存在。")
     return record
+
+
+def _review_run_or_404(record_id: str, run_id: int):
+    run = storage.get_ai_run(run_id)
+    if run is None or run.record_id != record_id or run.stage != "review":
+        raise HTTPException(status_code=404, detail="人工检查记录不存在。")
+    return run
 
 
 def _new_record_id(filename: str) -> str:
@@ -252,8 +263,13 @@ def organize_transcription(record_id: str, payload: dict[str, Any]) -> dict[str,
 @router.post("/transcriptions/{record_id}/ai/review")
 def review_transcription(record_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     record = _record_or_404(record_id)
-    source_text = str(payload.get("text") or record.text)
+    source_version_id = str(payload.get("source_version_id") or "").strip()
     try:
+        if source_version_id:
+            source_version = versioning.resolve_text_version(record, source_version_id)
+            source_text = str(source_version["text"])
+        else:
+            source_text = str(payload.get("text") or record.text)
         issues, result = ai_service.review_text(source_text)
         run = storage.add_ai_run(
             record_id,
@@ -262,21 +278,48 @@ def review_transcription(record_id: str, payload: dict[str, Any]) -> dict[str, A
             source_text=source_text,
             result_text=source_text,
             result=result,
-            options={"model": ai_service.DEEPSEEK_MODEL},
+            options={
+                "model": ai_service.DEEPSEEK_MODEL,
+                "source_version_id": source_version_id,
+            },
         )
         return {"run": run.to_dict(), "issue_count": len(issues)}
+    except versioning.VersionLookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     except ai_service.AIServiceError as exc:
         raise _ai_http_error(exc)
     except Exception as exc:
         raise _http_error(exc)
 
 
+@router.post("/transcriptions/{record_id}/ai/reviews/{run_id}/diff")
+def diff_review_draft(record_id: str, run_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+    _record_or_404(record_id)
+    run = _review_run_or_404(record_id, run_id)
+    edited_text = payload.get("text")
+    if not isinstance(edited_text, str):
+        raise HTTPException(status_code=400, detail="text 必须是字符串。")
+    current = {
+        "id": f"review:{run_id}:draft",
+        "stage": "review_draft",
+        "run_id": run_id,
+        "label": "当前编辑稿",
+        "text": edited_text,
+    }
+    baseline = {
+        "id": f"review:{run_id}:source",
+        "stage": "review_source",
+        "run_id": run_id,
+        "label": "AI 检查初稿",
+        "text": run.source_text,
+    }
+    return versioning.compare_text_versions(current, baseline)
+
+
 @router.patch("/transcriptions/{record_id}/ai/reviews/{run_id}")
 def update_review(record_id: str, run_id: int, payload: dict[str, Any]) -> dict[str, Any]:
     _record_or_404(record_id)
-    run = storage.get_ai_run(run_id)
-    if run is None or run.record_id != record_id or run.stage != "review":
-        raise HTTPException(status_code=404, detail="人工检查记录不存在。")
+    run = _review_run_or_404(record_id, run_id)
     text = str(payload.get("text") or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="检查文本不能为空。")
@@ -292,6 +335,44 @@ def update_review(record_id: str, run_id: int, payload: dict[str, Any]) -> dict[
     )
     updated = storage.update_ai_run(run_id, result_text=text, result=result)
     return {"run": updated.to_dict()}
+
+
+@router.post("/transcriptions/{record_id}/ai/reviews/{run_id}/exports")
+def export_review_result(record_id: str, run_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+    record = _record_or_404(record_id)
+    run = _review_run_or_404(record_id, run_id)
+    fmt = str(payload.get("format") or "").strip().lower()
+    if fmt not in REVIEW_EXPORT_FORMATS:
+        raise HTTPException(status_code=400, detail="STEP 2 结果支持导出 TXT、Markdown、PDF 或 JSON。")
+    text = str(run.result_text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="请先保存 STEP 2 人工修改结果。")
+    try:
+        path = exporters.export_review_result(
+            record,
+            run_id=run_id,
+            text=text,
+            fmt=fmt,
+        )
+        export_file = storage.add_export_file(record_id, f"ai-review-{fmt}", path)
+        result = dict(run.result)
+        export_file_ids = [
+            int(file_id)
+            for file_id in result.get("export_file_ids", [])
+            if isinstance(file_id, int) or str(file_id).isdigit()
+        ]
+        export_file_ids.append(int(export_file.id or 0))
+        result["export_file_ids"] = list(dict.fromkeys(export_file_ids))
+        updated = storage.update_ai_run(run_id, result_text=text, result=result)
+        return {
+            "run": updated.to_dict(),
+            "export_file": export_file.to_dict(),
+            "record": _record_or_404(record_id).to_dict(),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _http_error(exc)
 
 
 @router.post("/transcriptions/{record_id}/ai/analyze")
@@ -358,6 +439,115 @@ def create_all_exports(record_id: str) -> dict[str, Any]:
             "export_files": [export_file.to_dict() for export_file in export_files],
             "record": _record_or_404(record_id).to_dict(),
         }
+    except Exception as exc:
+        raise _http_error(exc)
+
+
+def _selected_export_files(
+    record_id: str,
+    payload: dict[str, Any],
+) -> tuple[list[int], list[Any]]:
+    raw_ids = payload.get("file_ids")
+    if not isinstance(raw_ids, list) or not raw_ids:
+        raise HTTPException(status_code=400, detail="请至少选择一个导出文件。")
+    try:
+        file_ids = list(dict.fromkeys(int(file_id) for file_id in raw_ids))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="file_ids 必须是文件 ID 数组。")
+    if any(file_id <= 0 for file_id in file_ids):
+        raise HTTPException(status_code=400, detail="文件 ID 无效。")
+    files = storage.get_export_files(record_id, file_ids)
+    if len(files) != len(file_ids):
+        raise HTTPException(status_code=404, detail="部分导出文件不存在或不属于当前记录。")
+    return file_ids, files
+
+
+def _safe_export_path(record: Any, export_file: Any) -> Path:
+    output_dir = Path(record.output_dir).resolve()
+    file_path = Path(export_file.path).resolve()
+    try:
+        file_path.relative_to(output_dir)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"文件不在当前记录的输出目录中：{export_file.filename}")
+    return file_path
+
+
+@router.post("/transcriptions/{record_id}/exports/download")
+def download_selected_exports(
+    record_id: str,
+    payload: dict[str, Any],
+) -> FileResponse:
+    record = _record_or_404(record_id)
+    _, files = _selected_export_files(record_id, payload)
+    temp_dir = Path(tempfile.mkdtemp(prefix="audio2text-selected-exports-"))
+    zip_path = temp_dir / f"{record.id}-selected-exports.zip"
+    used_names: set[str] = set()
+    try:
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
+            for export_file in files:
+                file_path = _safe_export_path(record, export_file)
+                if not file_path.is_file():
+                    raise HTTPException(status_code=404, detail=f"导出文件不存在：{export_file.filename}")
+                candidate = export_file.filename
+                stem = Path(candidate).stem
+                suffix = Path(candidate).suffix
+                index = 2
+                while candidate in used_names:
+                    candidate = f"{stem}-{index}{suffix}"
+                    index += 1
+                used_names.add(candidate)
+                archive.write(file_path, arcname=candidate)
+        return FileResponse(
+            str(zip_path),
+            media_type="application/zip",
+            filename=zip_path.name,
+            background=BackgroundTask(shutil.rmtree, temp_dir, ignore_errors=True),
+        )
+    except HTTPException:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
+    except Exception as exc:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise _http_error(exc)
+
+
+@router.post("/transcriptions/{record_id}/exports/delete")
+def delete_selected_exports(record_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    record = _record_or_404(record_id)
+    file_ids, files = _selected_export_files(record_id, payload)
+    paths_to_delete: dict[Path, str] = {}
+    retained_shared_paths: list[str] = []
+    for export_file in files:
+        file_path = _safe_export_path(record, export_file)
+        remaining_references = storage.count_export_path_references(
+            str(file_path),
+            excluding_file_ids=file_ids,
+        )
+        if remaining_references:
+            retained_shared_paths.append(str(file_path))
+        else:
+            paths_to_delete[file_path] = export_file.filename
+
+    try:
+        deleted_paths: list[str] = []
+        for file_path, filename in paths_to_delete.items():
+            if not file_path.exists():
+                continue
+            if not file_path.is_file():
+                raise HTTPException(status_code=400, detail=f"导出目标不是普通文件：{filename}")
+            file_path.unlink()
+            deleted_paths.append(str(file_path))
+        deleted_count = storage.delete_export_files(record_id, file_ids)
+        if deleted_count != len(file_ids):
+            raise RuntimeError("导出文件记录删除不完整。")
+        return {
+            "deleted_ids": file_ids,
+            "deleted_paths": deleted_paths,
+            "retained_shared_paths": retained_shared_paths,
+            "record": _record_or_404(record_id).to_dict(),
+        }
+    except HTTPException:
+        raise
     except Exception as exc:
         raise _http_error(exc)
 

@@ -292,6 +292,45 @@ def get_export_file(file_id: int) -> ExportFile | None:
         return _row_to_export_file(row) if row else None
 
 
+def get_export_files(record_id: str, file_ids: list[int]) -> list[ExportFile]:
+    normalized_ids = list(dict.fromkeys(int(file_id) for file_id in file_ids))
+    if not normalized_ids:
+        return []
+    placeholders = ",".join("?" for _ in normalized_ids)
+    with db_connection() as connection:
+        rows = connection.execute(
+            f"SELECT * FROM export_files WHERE record_id = ? AND id IN ({placeholders})",
+            (record_id, *normalized_ids),
+        ).fetchall()
+    files_by_id = {int(row["id"]): _row_to_export_file(row) for row in rows}
+    return [files_by_id[file_id] for file_id in normalized_ids if file_id in files_by_id]
+
+
+def count_export_path_references(path: str, *, excluding_file_ids: list[int] | None = None) -> int:
+    excluded_ids = list(dict.fromkeys(int(file_id) for file_id in (excluding_file_ids or [])))
+    query = "SELECT COUNT(*) FROM export_files WHERE path = ?"
+    params: list[Any] = [str(Path(path).resolve())]
+    if excluded_ids:
+        placeholders = ",".join("?" for _ in excluded_ids)
+        query += f" AND id NOT IN ({placeholders})"
+        params.extend(excluded_ids)
+    with db_connection() as connection:
+        return int(connection.execute(query, params).fetchone()[0])
+
+
+def delete_export_files(record_id: str, file_ids: list[int]) -> int:
+    normalized_ids = list(dict.fromkeys(int(file_id) for file_id in file_ids))
+    if not normalized_ids:
+        return 0
+    placeholders = ",".join("?" for _ in normalized_ids)
+    with db_connection() as connection:
+        cursor = connection.execute(
+            f"DELETE FROM export_files WHERE record_id = ? AND id IN ({placeholders})",
+            (record_id, *normalized_ids),
+        )
+        return int(cursor.rowcount)
+
+
 def add_ai_run(
     record_id: str,
     *,

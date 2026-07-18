@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import zipfile
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -49,6 +50,27 @@ def export_all_zip(record: TranscriptionRecord) -> tuple[list[Path], Path]:
         for file_path in files:
             archive.write(file_path, arcname=file_path.name)
     return files, zip_path.resolve()
+
+
+def export_review_result(
+    record: TranscriptionRecord,
+    *,
+    run_id: int,
+    text: str,
+    fmt: str,
+) -> Path:
+    """Export a saved STEP 2 text without mutating the transcription record."""
+    source_path = Path(record.original_filename)
+    output_name = f"{source_path.stem}-人工检查-{run_id}{source_path.suffix}"
+    output_record = replace(
+        record,
+        original_filename=output_name,
+        text=text,
+        segments=[],
+        export_files=[],
+        ai_runs=[],
+    )
+    return export_record(output_record, fmt)
 
 
 def _safe_text(record: TranscriptionRecord) -> str:
