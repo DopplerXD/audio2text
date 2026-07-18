@@ -1,6 +1,6 @@
 # 本地音频转文字
 
-一个本地运行的音频/视频转写与智能内容处理工具。当前版本为 v1.4：FunASR + Paraformer-zh 在本地完成中文识别，DeepSeek V4 Flash 可继续执行智能整理、版本对比、语境检查和场景化分析。
+一个本地运行的音频/视频转写与智能内容处理工具。当前功能版本为 v1.4，前端资源修订至 v1.4.6：FunASR + Paraformer-zh 在本地完成中文识别，DeepSeek V4 Flash 可继续执行智能整理、版本对比、语境检查和场景化分析。
 
 ## 功能
 
@@ -12,13 +12,14 @@
 - 支持编辑完整文本和字幕分段
 - 支持经二次确认后导出 TXT、Markdown、PDF、SRT、VTT、JSON
 - 支持经二次确认后一键导出全部格式并打包 ZIP
-- 导出列表支持全选、批量 ZIP 下载及二次确认删除，并可单独选择 AI 智能整理结果
+- 导出文件列表支持全选、批量 ZIP 下载、单项/批量二次确认删除，并区分常规导出、AI 智能整理和 STEP 2 修改结果
+- “导出结果”可选择当前识别正文或任一已保存的 STEP 2 人工修改版本作为内容来源；STEP 2 版本支持 TXT、Markdown、PDF、JSON
 - 智能整理可组合口水词去除、书面化改写、计算机术语修正和 Qn/An/Rn 问答分离
 - 默认仅启用“口水词去除 + 另存为新文件”，不会改动原始识别结果
 - 可同步处理字幕分段并生成 SRT/VTT，可额外保存 Markdown
 - 人工检查会标记不符合语境的非常用词，编辑标记片段后高亮自动解除
-- STEP 2 检查前仅展示可选择的送检正文；检查后保留已保存版本 Diff，并提供“只读手动修改 Diff + 可编辑正文”双栏实时对比
-- STEP 2 手动修改提供明确的未保存状态与保存入口；已保存版本可在“导出结果”中选择并生成 TXT、Markdown、PDF 或 JSON
+- STEP 2 检查前仅展示可选择的送检正文；检查后保留“已保存版本差异”，并提供“只读手动修改 Diff + 可编辑正文”双栏实时对比
+- STEP 2 手动修改提供明确的“未保存/已保存”状态与显式保存入口；只有已保存版本会出现在“导出结果”的内容来源中
 - 后端开发面试分析提供总体评价、维度评分、逐题优缺点和改进思路；未识别到回答时改为展示题目考察方向且不评分
 
 ## 环境要求
@@ -36,7 +37,7 @@ brew install ffmpeg
 ## 安装
 
 ```bash
-cd /Users/doppler/Documents/develop/audio2text
+cd audio2text
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -77,12 +78,14 @@ python3 -m pip install -r requirements.txt
 
 模型来源、许可证链接、再分发注意事项及本项目自身的许可证状态见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
+> 本仓库目前没有根目录 `LICENSE` 文件，尚未为项目自身代码授予开源许可证。第三方组件的 MIT 或 Apache-2.0 许可证不自动适用于本项目代码。
+
 ## 启动与停止
 
 启动：
 
 ```bash
-cd /Users/doppler/Documents/develop/audio2text
+cd audio2text
 python3 app.py
 ```
 
@@ -167,8 +170,11 @@ test_data/
 - `DELETE /api/transcriptions/{id}`
 - `POST /api/transcriptions/{id}/exports`
 - `POST /api/transcriptions/{id}/exports/all`
+- `POST /api/transcriptions/{id}/exports/download`
+- `POST /api/transcriptions/{id}/exports/delete`
 - `POST /api/transcriptions/{id}/ai/organize`
 - `POST /api/transcriptions/{id}/ai/review`
+- `POST /api/transcriptions/{id}/ai/reviews/{run_id}/diff`
 - `PATCH /api/transcriptions/{id}/ai/reviews/{run_id}`
 - `POST /api/transcriptions/{id}/ai/reviews/{run_id}/exports`
 - `POST /api/transcriptions/{id}/ai/analyze`
@@ -178,6 +184,8 @@ test_data/
 
 ```bash
 python3 -m py_compile app.py api.py ai_service.py versioning.py models.py config.py audio_utils.py transcriber.py storage.py exporters.py
+node --check static/app.js
+git diff --check
 ```
 
 运行自动化测试：
@@ -185,6 +193,8 @@ python3 -m py_compile app.py api.py ai_service.py versioning.py models.py config
 ```bash
 python3 -m unittest discover -s tests -v
 ```
+
+当前测试套件共 30 项，自动使用模拟 DeepSeek 响应，不消耗真实 API 配额。
 
 依赖导入检查：
 
