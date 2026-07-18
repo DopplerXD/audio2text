@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from config import DATABASE_PATH
-from models import ExportFile, Segment, TranscriptionRecord
+from models import AIRun, ExportFile, Segment, TranscriptionRecord
 
 
 TZ = ZoneInfo("Asia/Shanghai")
@@ -24,8 +25,18 @@ def get_connection() -> sqlite3.Connection:
     return connection
 
 
+@contextmanager
+def db_connection():
+    connection = get_connection()
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
+
+
 def init_db() -> None:
-    with get_connection() as connection:
+    with db_connection() as connection:
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS records (
@@ -47,6 +58,26 @@ def init_db() -> None:
                 updated_at TEXT NOT NULL
             )
             """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ai_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                record_id TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                preset TEXT NOT NULL DEFAULT '',
+                source_text TEXT NOT NULL DEFAULT '',
+                result_text TEXT NOT NULL DEFAULT '',
+                result_json TEXT NOT NULL DEFAULT '{}',
+                options_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(record_id) REFERENCES records(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ai_runs_record_stage ON ai_runs(record_id, stage, id DESC)"
         )
         connection.execute(
             """
@@ -84,7 +115,26 @@ def _row_to_export_file(row: sqlite3.Row) -> ExportFile:
     )
 
 
-def _row_to_record(row: sqlite3.Row, export_files: list[ExportFile]) -> TranscriptionRecord:
+def _row_to_ai_run(row: sqlite3.Row) -> AIRun:
+    return AIRun(
+        id=row["id"],
+        record_id=row["record_id"],
+        stage=row["stage"],
+        preset=row["preset"],
+        source_text=row["source_text"] or "",
+        result_text=row["result_text"] or "",
+        result=json.loads(row["result_json"] or "{}"),
+        options=json.loads(row["options_json"] or "{}"),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _row_to_record(
+    row: sqlite3.Row,
+    export_files: list[ExportFile],
+    ai_runs: list[AIRun] | None = None,
+) -> TranscriptionRecord:
     segments_data = json.loads(row["segments_json"] or "[]")
     return TranscriptionRecord(
         id=row["id"],
@@ -104,6 +154,7 @@ def _row_to_record(row: sqlite3.Row, export_files: list[ExportFile]) -> Transcri
         error_message=row["error_message"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        ai_runs=ai_runs or [],
     )
 
 
@@ -117,7 +168,7 @@ def create_record(
     model_name: str,
 ) -> None:
     timestamp = now_iso()
-    with get_connection() as connection:
+    with db_connection() as connection:
         connection.execute(
             """
             INSERT INTO records (
@@ -148,12 +199,12 @@ def update_record(record_id: str, **fields: Any) -> None:
         fields["segments_json"] = _segments_to_json(fields.pop("segments"))
     assignments = ", ".join(f"{key} = ?" for key in fields)
     values = list(fields.values()) + [record_id]
-    with get_connection() as connection:
+    with db_connection() as connection:
         connection.execute(f"UPDATE records SET {assignments} WHERE id = ?", values)
 
 
 def list_records() -> list[TranscriptionRecord]:
-    with get_connection() as connection:
+    with db_connection() as connection:
         rows = connection.execute(
             "SELECT * FROM records ORDER BY created_at DESC"
         ).fetchall()
@@ -161,7 +212,7 @@ def list_records() -> list[TranscriptionRecord]:
 
 
 def get_record(record_id: str) -> TranscriptionRecord | None:
-    with get_connection() as connection:
+    with db_connection() as connection:
         row = connection.execute("SELECT * FROM records WHERE id = ?", (record_id,)).fetchone()
         if row is None:
             return None
@@ -169,14 +220,22 @@ def get_record(record_id: str) -> TranscriptionRecord | None:
             "SELECT * FROM export_files WHERE record_id = ? ORDER BY created_at DESC, id DESC",
             (record_id,),
         ).fetchall()
-        return _row_to_record(row, [_row_to_export_file(export) for export in exports])
+        ai_runs = connection.execute(
+            "SELECT * FROM ai_runs WHERE record_id = ? ORDER BY id DESC",
+            (record_id,),
+        ).fetchall()
+        return _row_to_record(
+            row,
+            [_row_to_export_file(export) for export in exports],
+            [_row_to_ai_run(run) for run in ai_runs],
+        )
 
 
 def add_export_file(record_id: str, fmt: str, path: str | Path) -> ExportFile:
     file_path = Path(path).resolve()
     created_at = now_iso()
     size = file_path.stat().st_size
-    with get_connection() as connection:
+    with db_connection() as connection:
         cursor = connection.execute(
             """
             INSERT INTO export_files (record_id, format, filename, path, size, created_at)
@@ -189,12 +248,73 @@ def add_export_file(record_id: str, fmt: str, path: str | Path) -> ExportFile:
 
 
 def get_export_file(file_id: int) -> ExportFile | None:
-    with get_connection() as connection:
+    with db_connection() as connection:
         row = connection.execute("SELECT * FROM export_files WHERE id = ?", (file_id,)).fetchone()
         return _row_to_export_file(row) if row else None
 
 
+def add_ai_run(
+    record_id: str,
+    *,
+    stage: str,
+    preset: str = "",
+    source_text: str,
+    result_text: str,
+    result: dict[str, Any] | None = None,
+    options: dict[str, Any] | None = None,
+) -> AIRun:
+    timestamp = now_iso()
+    result_json = json.dumps(result or {}, ensure_ascii=False)
+    options_json = json.dumps(options or {}, ensure_ascii=False)
+    with db_connection() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO ai_runs (
+                record_id, stage, preset, source_text, result_text,
+                result_json, options_json, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                record_id,
+                stage,
+                preset,
+                source_text,
+                result_text,
+                result_json,
+                options_json,
+                timestamp,
+                timestamp,
+            ),
+        )
+        run_id = int(cursor.lastrowid)
+        row = connection.execute("SELECT * FROM ai_runs WHERE id = ?", (run_id,)).fetchone()
+    if row is None:
+        raise RuntimeError("AI 处理记录保存失败。")
+    return _row_to_ai_run(row)
+
+
+def get_ai_run(run_id: int) -> AIRun | None:
+    with db_connection() as connection:
+        row = connection.execute("SELECT * FROM ai_runs WHERE id = ?", (run_id,)).fetchone()
+        return _row_to_ai_run(row) if row else None
+
+
+def update_ai_run(run_id: int, *, result_text: str, result: dict[str, Any]) -> AIRun:
+    timestamp = now_iso()
+    with db_connection() as connection:
+        connection.execute(
+            "UPDATE ai_runs SET result_text = ?, result_json = ?, updated_at = ? WHERE id = ?",
+            (result_text, json.dumps(result, ensure_ascii=False), timestamp, run_id),
+        )
+        row = connection.execute("SELECT * FROM ai_runs WHERE id = ?", (run_id,)).fetchone()
+    if row is None:
+        raise KeyError("AI 处理记录不存在。")
+    return _row_to_ai_run(row)
+
+
 def delete_record(record_id: str) -> None:
-    with get_connection() as connection:
+    with db_connection() as connection:
+        connection.execute("DELETE FROM ai_runs WHERE record_id = ?", (record_id,))
         connection.execute("DELETE FROM export_files WHERE record_id = ?", (record_id,))
         connection.execute("DELETE FROM records WHERE id = ?", (record_id,))

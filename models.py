@@ -68,6 +68,34 @@ class ExportFile:
 
 
 @dataclass
+class AIRun:
+    id: int | None
+    record_id: str
+    stage: str
+    preset: str
+    source_text: str
+    result_text: str
+    result: dict[str, Any]
+    options: dict[str, Any]
+    created_at: str
+    updated_at: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "record_id": self.record_id,
+            "stage": self.stage,
+            "preset": self.preset,
+            "source_text": self.source_text,
+            "result_text": self.result_text,
+            "result": self.result,
+            "options": self.options,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+
+@dataclass
 class TranscriptionRecord:
     id: str
     original_filename: str
@@ -86,6 +114,7 @@ class TranscriptionRecord:
     error_message: str | None
     created_at: str
     updated_at: str
+    ai_runs: list[AIRun] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -109,6 +138,7 @@ class TranscriptionRecord:
             "error_message": self.error_message,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "ai_runs": [run.to_dict() for run in self.ai_runs],
         }
 
 

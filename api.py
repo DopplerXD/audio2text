@@ -10,6 +10,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 import audio_utils
+import ai_service
 import exporters
 import storage
 from config import (
@@ -35,6 +36,11 @@ router = APIRouter(prefix="/api")
 
 
 def _http_error(exc: Exception, status_code: int = 400) -> HTTPException:
+    return HTTPException(status_code=status_code, detail=str(exc))
+
+
+def _ai_http_error(exc: Exception) -> HTTPException:
+    status_code = 503 if "API Key" in str(exc) else 502
     return HTTPException(status_code=status_code, detail=str(exc))
 
 
@@ -69,6 +75,7 @@ def health() -> dict[str, Any]:
         "punc_model": FUNASR_PUNC_MODEL,
         "base_dir": str(BASE_DIR),
         "output_dir": str(OUTPUTS_DIR),
+        "ai": ai_service.ai_config(),
     }
 
 
@@ -146,14 +153,145 @@ def get_transcription(record_id: str) -> dict[str, Any]:
 
 @router.patch("/transcriptions/{record_id}")
 def update_transcription(record_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-    _record_or_404(record_id)
-    segments = [Segment.from_dict(segment) for segment in payload.get("segments", [])]
+    record = _record_or_404(record_id)
+    segments = [Segment.from_dict(segment) for segment in payload.get("segments", record.segments)]
     storage.update_record(
         record_id,
         text=str(payload.get("text", "")),
         segments=segments,
     )
     return _record_or_404(record_id).to_dict()
+
+
+@router.post("/transcriptions/{record_id}/ai/organize")
+def organize_transcription(record_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    record = _record_or_404(record_id)
+    operations = payload.get("operations", ["remove_fillers"])
+    if not isinstance(operations, list):
+        raise HTTPException(status_code=400, detail="operations 必须是数组。")
+    source_text = str(payload.get("text") or record.text)
+    sync_subtitles = bool(payload.get("sync_subtitles", False))
+    save_as_new = bool(payload.get("save_as_new", True))
+    save_markdown = bool(payload.get("save_markdown", False))
+    options = {
+        "operations": operations,
+        "sync_subtitles": sync_subtitles,
+        "save_as_new": save_as_new,
+        "save_markdown": save_markdown,
+        "model": ai_service.DEEPSEEK_MODEL,
+    }
+    try:
+        text, segments, result = ai_service.organize_text(
+            record,
+            source_text=source_text,
+            operations=operations,
+            sync_subtitles=sync_subtitles,
+        )
+        run = storage.add_ai_run(
+            record_id,
+            stage="organize",
+            preset="custom",
+            source_text=source_text,
+            result_text=text,
+            result=result,
+            options=options,
+        )
+        if not save_as_new:
+            update_fields: dict[str, Any] = {"text": text}
+            if sync_subtitles:
+                update_fields["segments"] = segments
+            storage.update_record(record_id, **update_fields)
+
+        export_files = []
+        for fmt, path in ai_service.export_organized_files(
+            record,
+            run_id=int(run.id or 0),
+            text=text,
+            segments=segments,
+            save_as_new=save_as_new,
+            save_markdown=save_markdown,
+            sync_subtitles=sync_subtitles,
+        ):
+            export_files.append(storage.add_export_file(record_id, f"ai-{fmt}", path))
+        result["export_file_ids"] = [export_file.id for export_file in export_files]
+        run = storage.update_ai_run(int(run.id or 0), result_text=text, result=result)
+        return {
+            "run": run.to_dict(),
+            "export_files": [export_file.to_dict() for export_file in export_files],
+            "record": _record_or_404(record_id).to_dict(),
+        }
+    except ai_service.AIServiceError as exc:
+        raise _ai_http_error(exc)
+    except Exception as exc:
+        raise _http_error(exc)
+
+
+@router.post("/transcriptions/{record_id}/ai/review")
+def review_transcription(record_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    record = _record_or_404(record_id)
+    source_text = str(payload.get("text") or record.text)
+    try:
+        issues, result = ai_service.review_text(source_text)
+        run = storage.add_ai_run(
+            record_id,
+            stage="review",
+            preset="contextual_anomaly",
+            source_text=source_text,
+            result_text=source_text,
+            result=result,
+            options={"model": ai_service.DEEPSEEK_MODEL},
+        )
+        return {"run": run.to_dict(), "issue_count": len(issues)}
+    except ai_service.AIServiceError as exc:
+        raise _ai_http_error(exc)
+    except Exception as exc:
+        raise _http_error(exc)
+
+
+@router.patch("/transcriptions/{record_id}/ai/reviews/{run_id}")
+def update_review(record_id: str, run_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+    _record_or_404(record_id)
+    run = storage.get_ai_run(run_id)
+    if run is None or run.record_id != record_id or run.stage != "review":
+        raise HTTPException(status_code=404, detail="人工检查记录不存在。")
+    text = str(payload.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="检查文本不能为空。")
+    resolved_ids = payload.get("resolved_issue_ids", [])
+    if not isinstance(resolved_ids, list):
+        raise HTTPException(status_code=400, detail="resolved_issue_ids 必须是数组。")
+    result = dict(run.result)
+    issues = result.get("issues", [])
+    result["issues"] = ai_service.refresh_review_issues(
+        text,
+        issues if isinstance(issues, list) else [],
+        resolved_ids,
+    )
+    updated = storage.update_ai_run(run_id, result_text=text, result=result)
+    return {"run": updated.to_dict()}
+
+
+@router.post("/transcriptions/{record_id}/ai/analyze")
+def analyze_transcription(record_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    record = _record_or_404(record_id)
+    source_text = str(payload.get("text") or record.text)
+    preset = str(payload.get("preset") or "backend_interview")
+    try:
+        result = ai_service.analyze_text(source_text, preset=preset)
+        run = storage.add_ai_run(
+            record_id,
+            stage="analysis",
+            preset=preset,
+            source_text=source_text,
+            result_text=result["summary"],
+            result=result,
+            options={"model": ai_service.DEEPSEEK_MODEL},
+        )
+        return {"run": run.to_dict()}
+    except ai_service.AIServiceError as exc:
+        raise _ai_http_error(exc)
+    except Exception as exc:
+        raise _http_error(exc)
 
 
 @router.delete("/transcriptions/{record_id}")

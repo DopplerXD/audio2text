@@ -5,3 +5,5 @@ torch
 torchaudio
 funasr
 reportlab
+httpx
+python-dotenv

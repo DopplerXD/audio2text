@@ -1,6 +1,6 @@
 # 本地音频转文字
 
-一个本地运行的音频/视频转写工具。当前版本为 v1.2，识别引擎使用 FunASR + Paraformer-zh 中文离线模型，支持上传单个音频或视频文件、查看和编辑转写结果、保存历史记录，并导出 TXT、Markdown、PDF、SRT、VTT、JSON 和 ZIP。
+一个本地运行的音频/视频转写与智能内容处理工具。当前版本为 v1.3：FunASR + Paraformer-zh 在本地完成中文识别，DeepSeek V4 Flash 可继续执行智能整理、语境检查和场景化分析。
 
 ## 功能
 
@@ -12,6 +12,11 @@
 - 支持编辑完整文本和字幕分段
 - 支持导出 TXT、Markdown、PDF、SRT、VTT、JSON
 - 支持一键导出全部格式并打包 ZIP
+- 智能整理可组合口水词去除、书面化改写、计算机术语修正和 Qn/An/Rn 问答分离
+- 默认仅启用“口水词去除 + 另存为新文件”，不会改动原始识别结果
+- 可同步处理字幕分段并生成 SRT/VTT，可额外保存 Markdown
+- 人工检查会标记不符合语境的非常用词，编辑标记片段后高亮自动解除
+- 后端开发面试分析提供总体评价、维度评分、逐题优缺点和改进思路
 
 ## 环境要求
 
@@ -34,6 +39,23 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+复制环境配置并填写 DeepSeek API Key：
+
+```bash
+cp .env.example .env
+```
+
+编辑 `.env`：
+
+```dotenv
+DEEPSEEK_API_KEY=你的_API_Key
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL=deepseek-v4-flash
+DEEPSEEK_TIMEOUT_SECONDS=180
+```
+
+`.env` 已加入 `.gitignore`，真实密钥不会进入版本控制。修改 `.env` 后需要重启服务。
+
 如果不使用虚拟环境，也可以直接安装到当前 Python 环境：
 
 ```bash
@@ -41,6 +63,8 @@ python3 -m pip install -r requirements.txt
 ```
 
 首次识别时，FunASR 会下载模型文件，耗时取决于网络和机器性能。
+
+> 隐私提示：音频识别在本地完成；只有在点击智能整理、人工检查或智能分析时，相应文字内容才会发送至配置的 DeepSeek API。请确认内容符合你的数据处理要求。
 
 ## 启动与停止
 
@@ -89,6 +113,7 @@ FUNASR_DEVICE=cpu python3 app.py
 audio2text/
 ├── app.py                 # FastAPI 应用入口
 ├── api.py                 # API 路由
+├── ai_service.py          # DeepSeek 客户端、Prompt 与三阶段处理逻辑
 ├── audio_utils.py         # FFmpeg 检查、上传保存和转码
 ├── config.py              # 路径、模型和应用配置
 ├── exporters.py           # TXT / MD / PDF / SRT / VTT / JSON / ZIP 导出
@@ -100,6 +125,8 @@ audio2text/
 │   ├── styles.css
 │   └── app.js
 ├── requirements.txt
+├── .env.example           # DeepSeek 环境配置模板
+├── tests/                 # AI、持久化与 API 自动化测试
 └── README.md
 ```
 
@@ -125,12 +152,22 @@ test_data/
 - `DELETE /api/transcriptions/{id}`
 - `POST /api/transcriptions/{id}/exports`
 - `POST /api/transcriptions/{id}/exports/all`
+- `POST /api/transcriptions/{id}/ai/organize`
+- `POST /api/transcriptions/{id}/ai/review`
+- `PATCH /api/transcriptions/{id}/ai/reviews/{run_id}`
+- `POST /api/transcriptions/{id}/ai/analyze`
 - `GET /api/files/{file_id}`
 
 ## 开发检查
 
 ```bash
-python3 -m py_compile app.py api.py models.py config.py audio_utils.py transcriber.py storage.py exporters.py
+python3 -m py_compile app.py api.py ai_service.py models.py config.py audio_utils.py transcriber.py storage.py exporters.py
+```
+
+运行自动化测试：
+
+```bash
+python3 -m unittest discover -s tests -v
 ```
 
 依赖导入检查：
