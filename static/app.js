@@ -7,6 +7,12 @@ const state = {
   workingSource: "",
   currentReview: null,
   resolvedIssueIds: new Set(),
+  textVersions: [],
+  leftVersionId: null,
+  rightVersionId: null,
+  versionLoadId: 0,
+  diffRequestId: 0,
+  diffScrollSync: false,
   busy: new Set(),
 };
 
@@ -146,8 +152,11 @@ async function loadRecords() {
 }
 
 async function loadRecord(id) {
-  state.currentRecord = await api(`/api/transcriptions/${encodeURIComponent(id)}`);
+  const record = await api(`/api/transcriptions/${encodeURIComponent(id)}`);
+  state.currentRecord = record;
+  resetVersionComparison();
   renderCurrentRecord();
+  await loadTextVersions({ resetDefaults: true });
 }
 
 function renderHistory() {
@@ -266,6 +275,157 @@ function latestRun(stage) {
   return (state.currentRecord?.ai_runs || [])
     .filter((run) => run.stage === stage)
     .sort((a, b) => Number(b.id) - Number(a.id))[0] || null;
+}
+
+function textVersion(versionId) {
+  return state.textVersions.find((version) => version.id === versionId) || null;
+}
+
+function resetVersionComparison() {
+  state.textVersions = [];
+  state.leftVersionId = null;
+  state.rightVersionId = null;
+  state.versionLoadId += 1;
+  state.diffRequestId += 1;
+  [$("#leftVersionSelect"), $("#rightVersionSelect")].forEach((select) => {
+    select.disabled = true;
+    select.innerHTML = "<option>正在加载版本…</option>";
+  });
+  $("#leftDiffText").textContent = "";
+  $("#rightDiffText").textContent = "";
+  $("#diffStats").textContent = "等待加载版本";
+  setInlineStatus("#diffStatus", "", "neutral");
+  updateAIAvailability();
+}
+
+function renderVersionSelectors() {
+  const selections = [
+    [$("#leftVersionSelect"), state.leftVersionId],
+    [$("#rightVersionSelect"), state.rightVersionId],
+  ];
+  selections.forEach(([select, selectedId]) => {
+    select.innerHTML = "";
+    state.textVersions.forEach((version) => {
+      const option = document.createElement("option");
+      option.value = version.id;
+      option.textContent = version.label;
+      option.selected = version.id === selectedId;
+      select.appendChild(option);
+    });
+    select.disabled = !state.textVersions.length;
+  });
+}
+
+async function loadTextVersions({ preferLeftId = null, resetDefaults = false, resetRightToOriginal = false } = {}) {
+  const recordId = state.currentRecord?.id;
+  if (!recordId) return;
+  const loadId = ++state.versionLoadId;
+  setInlineStatus("#diffStatus", "正在加载文本版本…", "loading");
+  try {
+    const response = await api(`/api/transcriptions/${encodeURIComponent(recordId)}/versions`);
+    if (state.currentRecord?.id !== recordId || loadId !== state.versionLoadId) return;
+    state.textVersions = Array.isArray(response.versions) ? response.versions : [];
+    const original = state.textVersions.find((version) => version.stage === "original") || state.textVersions[0] || null;
+    const latestOrganized = state.textVersions.find((version) => version.stage === "organize") || null;
+    const preferred = textVersion(preferLeftId);
+    const previousLeft = textVersion(state.leftVersionId);
+    const previousRight = textVersion(state.rightVersionId);
+
+    if (resetDefaults) {
+      state.leftVersionId = (preferred || latestOrganized || original)?.id || null;
+      state.rightVersionId = original?.id || state.leftVersionId;
+    } else {
+      state.leftVersionId = (preferred || previousLeft || latestOrganized || original)?.id || null;
+      state.rightVersionId = (resetRightToOriginal ? original : previousRight || original)?.id || state.leftVersionId;
+    }
+    renderVersionSelectors();
+    updateAIAvailability();
+    await refreshVersionDiff();
+  } catch (error) {
+    if (state.currentRecord?.id !== recordId || loadId !== state.versionLoadId) return;
+    setInlineStatus("#diffStatus", error.message, "error");
+    $("#diffStats").textContent = "版本加载失败";
+    updateAIAvailability();
+  }
+}
+
+function renderDiffText(chunks, side) {
+  const textKey = side === "left" ? "left_text" : "right_text";
+  return chunks.map((chunk) => {
+    const value = chunk[textKey] || "";
+    if (!value) return "";
+    const highlighted = side === "left"
+      ? chunk.type === "left_only" || chunk.type === "replace"
+      : chunk.type === "right_only" || chunk.type === "replace";
+    const className = highlighted ? (side === "left" ? "diff-added" : "diff-removed") : "diff-equal";
+    return `<span class="${className}">${escapeHtml(value)}</span>`;
+  }).join("");
+}
+
+async function refreshVersionDiff() {
+  const recordId = state.currentRecord?.id;
+  const leftVersion = textVersion(state.leftVersionId);
+  const rightVersion = textVersion(state.rightVersionId);
+  if (!recordId || !leftVersion || !rightVersion) {
+    $("#leftDiffText").textContent = "暂无可对比版本。";
+    $("#rightDiffText").textContent = "暂无可对比版本。";
+    $("#diffStats").textContent = "暂无版本";
+    return;
+  }
+
+  const requestId = ++state.diffRequestId;
+  const diffSurface = $(".version-diff");
+  diffSurface.setAttribute("aria-busy", "true");
+  setInlineStatus("#diffStatus", "正在计算版本差异…", "loading");
+  try {
+    const result = await api(`/api/transcriptions/${encodeURIComponent(recordId)}/versions/diff`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        left_version_id: leftVersion.id,
+        right_version_id: rightVersion.id,
+      }),
+    });
+    if (requestId !== state.diffRequestId || state.currentRecord?.id !== recordId) return;
+    const chunks = Array.isArray(result.chunks) ? result.chunks : [];
+    $("#leftDiffText").innerHTML = renderDiffText(chunks, "left") || '<span class="diff-empty">空文本</span>';
+    $("#rightDiffText").innerHTML = renderDiffText(chunks, "right") || '<span class="diff-empty">空文本</span>';
+    if (result.identical) {
+      $("#diffStats").textContent = "内容一致 · 0 处差异";
+      setInlineStatus("#diffStatus", "两个版本内容一致。", "success");
+    } else {
+      const counts = result.counts || {};
+      $("#diffStats").textContent = `新增 ${Number(counts.added_chars) || 0} 字 · 删除 ${Number(counts.removed_chars) || 0} 字 · 修改 ${Number(counts.changed_chars) || 0} 字`;
+      setInlineStatus("#diffStatus", "已按右侧基准标出左侧变化。", "success");
+    }
+    $("#leftDiffText").scrollTop = 0;
+    $("#rightDiffText").scrollTop = 0;
+  } catch (error) {
+    if (requestId !== state.diffRequestId || state.currentRecord?.id !== recordId) return;
+    setInlineStatus("#diffStatus", error.message, "error");
+    $("#diffStats").textContent = "Diff 计算失败";
+  } finally {
+    if (requestId === state.diffRequestId) diffSurface.setAttribute("aria-busy", "false");
+  }
+}
+
+function handleVersionSelection(side) {
+  if (side === "left") state.leftVersionId = $("#leftVersionSelect").value;
+  else state.rightVersionId = $("#rightVersionSelect").value;
+  refreshVersionDiff();
+  updateAIAvailability();
+}
+
+function syncDiffScroll(event) {
+  if (state.diffScrollSync || window.matchMedia("(max-width: 720px)").matches) return;
+  const source = event.currentTarget;
+  const target = source.id === "leftDiffText" ? $("#rightDiffText") : $("#leftDiffText");
+  const sourceRange = source.scrollHeight - source.clientHeight;
+  const targetRange = target.scrollHeight - target.clientHeight;
+  if (sourceRange <= 0 || targetRange <= 0) return;
+  state.diffScrollSync = true;
+  target.scrollTop = (source.scrollTop / sourceRange) * targetRange;
+  requestAnimationFrame(() => { state.diffScrollSync = false; });
 }
 
 function hydrateAIWorkspace() {
@@ -437,7 +597,8 @@ function renderAnalysisResult(run) {
     return;
   }
   const result = run.result;
-  const score = Math.max(0, Math.min(100, Number(result.overall_score) || 0));
+  const hasOverallScore = result.overall_score !== null && result.overall_score !== undefined && Number.isFinite(Number(result.overall_score));
+  const score = hasOverallScore ? Math.max(0, Math.min(100, Number(result.overall_score))) : 0;
   const dimensions = Array.isArray(result.dimensions) ? result.dimensions : [];
   const questions = Array.isArray(result.questions) ? result.questions : [];
   const actions = Array.isArray(result.action_items) ? result.action_items : [];
@@ -445,7 +606,7 @@ function renderAnalysisResult(run) {
   container.classList.remove("hidden");
   container.innerHTML = `
     <section class="analysis-overview">
-      <div class="score-ring" style="--score:${score}"><strong>${score}</strong><span>综合分</span></div>
+      <div class="score-ring${hasOverallScore ? "" : " no-score"}" style="--score:${score}"><strong>${hasOverallScore ? Math.round(score) : "—"}</strong><span>${hasOverallScore ? "综合分" : "未评分"}</span></div>
       <div><span class="recommendation">${escapeHtml(result.hiring_recommendation || "信息不足")}</span>
         <h3>总体评价</h3><p>${escapeHtml(result.summary || "暂无总体评价。")}</p>
       </div>
@@ -457,22 +618,34 @@ function renderAnalysisResult(run) {
     `).join("")}</section>` : ""}
     <section class="question-analysis">
       <div class="result-header"><div><span class="eyebrow">逐题复盘</span><h3>${questions.length} 道题目</h3></div></div>
-      ${questions.length ? questions.map((item, index) => `
-        <details class="question-card" ${index === 0 ? "open" : ""}>
-          <summary><span>Q${escapeHtml(item.index || index + 1)}</span><strong>${escapeHtml(item.question || "未识别题目")}</strong><b>${Math.round(Number(item.score) || 0)} 分</b></summary>
-          <div class="question-body">
-            <div class="answer-summary"><span>回答摘要</span><p>${escapeHtml(item.answer_summary || "未识别到明确回答。")}</p></div>
-            <div class="pros-cons">
-              <div><h4>优点</h4>${renderStringList(item.strengths, "暂无明确优点")}</div>
-              <div><h4>可改进</h4>${renderStringList(item.weaknesses, "暂无明确问题")}</div>
-            </div>
-            <div class="better-answer"><h4>更好的回答思路</h4><p>${escapeHtml(item.better_answer || "暂无建议。")}</p></div>
-          </div>
-        </details>
-      `).join("") : '<p class="muted-text">未能从当前文本识别出成对问答。</p>'}
+      ${questions.length ? questions.map(renderQuestionAnalysis).join("") : '<p class="muted-text">未能从当前文本识别出明确题目。</p>'}
     </section>
     ${actions.length ? `<section class="action-list"><span class="eyebrow">提升建议</span><h3>下一步行动</h3>${renderStringList(actions)}</section>` : ""}
     ${uncertainties.length ? `<section class="uncertainty"><strong>分析限制</strong>${renderStringList(uncertainties)}</section>` : ""}
+  `;
+}
+
+function renderQuestionAnalysis(item, index) {
+  const hasAnswer = item.has_answer !== false && item.score !== null && item.score !== undefined;
+  const scoreLabel = hasAnswer ? `${Math.round(Number(item.score) || 0)} 分` : "未评分";
+  const focusAreas = Array.isArray(item.focus_areas) ? item.focus_areas.filter(Boolean) : [];
+  return `
+    <details class="question-card${hasAnswer ? "" : " no-answer"}" ${index === 0 ? "open" : ""}>
+      <summary><span>Q${escapeHtml(item.index || index + 1)}</span><strong>${escapeHtml(item.question || "未识别题目")}</strong><b>${scoreLabel}</b></summary>
+      <div class="question-body">
+        ${hasAnswer ? `
+          <div class="answer-summary"><span>回答摘要</span><p>${escapeHtml(item.answer_summary || "暂无回答摘要。")}</p></div>
+          <div class="pros-cons">
+            <div><h4>优点</h4>${renderStringList(item.strengths, "暂无明确优点")}</div>
+            <div><h4>可改进</h4>${renderStringList(item.weaknesses, "暂无明确问题")}</div>
+          </div>
+          <div class="better-answer"><h4>更好的回答思路</h4><p>${escapeHtml(item.better_answer || "暂无建议。")}</p></div>
+        ` : `
+          <div class="no-answer-note"><strong>未识别到回答</strong><p>${escapeHtml(item.answer_summary || "当前转写中没有找到与该问题对应的回答，因此不评分。")}</p></div>
+        `}
+        ${focusAreas.length ? `<div class="focus-areas"><h4>考察方向</h4>${renderStringList(focusAreas)}</div>` : ""}
+      </div>
+    </details>
   `;
 }
 
@@ -483,12 +656,16 @@ function renderStringList(items, fallback = "暂无") {
 
 function updateAIAvailability() {
   const hasRecord = Boolean(state.currentRecord?.text);
+  const hasReviewSource = Boolean(textVersion(state.leftVersionId)?.text);
   $$(".ai-action").forEach((button) => {
     const stage = button.id === "organizeBtn" ? "organize" : button.id === "reviewBtn" ? "review" : "analysis";
     const isBusy = state.busy.has(stage);
-    button.disabled = !hasRecord || isBusy;
+    const missingSource = stage === "review" && !hasReviewSource;
+    button.disabled = !hasRecord || isBusy || missingSource;
     button.title = !hasRecord
       ? "请先选择一条有文本内容的识别记录"
+      : missingSource
+        ? "正在加载可送检的文本版本"
       : state.aiConfig?.configured
         ? ""
         : "点击后将重新检查 DeepSeek 配置";
@@ -543,7 +720,9 @@ async function startTranscription() {
   try {
     state.currentRecord = await api("/api/transcriptions", { method: "POST", body: form });
     await loadRecords();
+    resetVersionComparison();
     renderCurrentRecord();
+    await loadTextVersions({ resetDefaults: true });
     setMessage("识别完成，可进入智能处理。");
   } catch (error) {
     setStatus($("#backendStatus"), "failed", "失败");
@@ -606,6 +785,10 @@ async function organizeContent() {
     });
     state.currentRecord = response.record;
     renderCurrentRecord();
+    await loadTextVersions({
+      preferLeftId: `organize:${response.run.id}`,
+      resetRightToOriginal: true,
+    });
     activateAIStage("organize");
     setInlineStatus("#organizeStatus", `整理完成 · 版本 #${response.run.id}`, "success");
     setMessage("智能整理完成，结果已作为后续检查与分析的输入。");
@@ -618,7 +801,9 @@ async function organizeContent() {
 
 async function startReview() {
   if (!state.currentRecord) return setInlineStatus("#reviewStatus", "请先选择一条识别记录。", true);
-  const sourceText = currentWorkingText();
+  const sourceVersion = textVersion(state.leftVersionId);
+  if (!sourceVersion?.text) return setInlineStatus("#reviewStatus", "请选择左侧送检版本。", true);
+  const sourceText = sourceVersion.text;
   setAIBusy("review", true, "#reviewStatus", "正在确认 DeepSeek 配置…");
   try {
     if (!(await ensureAIReady("#reviewStatus"))) return;
@@ -633,6 +818,7 @@ async function startReview() {
     state.workingSource = `检查版本 #${response.run.id}`;
     $("#workingSource").textContent = `当前输入 · ${state.workingSource}`;
     renderReviewResult(response.run);
+    await loadTextVersions();
     setInlineStatus("#reviewStatus", `检查完成 · ${response.issue_count} 处待确认`, "success");
   } catch (error) {
     setInlineStatus("#reviewStatus", error.message, "error");
@@ -663,6 +849,7 @@ async function saveReview() {
     state.workingSource = `检查版本 #${response.run.id}`;
     $("#workingSource").textContent = `当前输入 · ${state.workingSource}`;
     renderReviewResult(response.run);
+    await loadTextVersions({ preferLeftId: `review:${response.run.id}` });
     setInlineStatus("#reviewStatus", "检查修改已保存。", "success");
   } catch (error) {
     setInlineStatus("#reviewStatus", error.message, "error");
@@ -755,6 +942,10 @@ function setupEvents() {
   $("#analyzeBtn").addEventListener("click", analyzeContent);
   $("#copyOrganizedBtn").addEventListener("click", () => copyText($("#organizedPreview").value));
   $("#reviewEditor").addEventListener("input", handleReviewEdit);
+  $("#leftVersionSelect").addEventListener("change", () => handleVersionSelection("left"));
+  $("#rightVersionSelect").addEventListener("change", () => handleVersionSelection("right"));
+  $("#leftDiffText").addEventListener("scroll", syncDiffScroll, { passive: true });
+  $("#rightDiffText").addEventListener("scroll", syncDiffScroll, { passive: true });
   window.addEventListener("focus", () => loadHealth({ silent: true }));
 
   document.body.addEventListener("click", async (event) => {

@@ -56,6 +56,8 @@ class AIServiceTests(unittest.TestCase):
         self.assertIn("口水词去除", prompt)
         self.assertNotIn("书面化改写", prompt)
         self.assertIn("segments 固定返回空数组", prompt)
+        self.assertEqual(prompt.count("<transcript>"), 1)
+        self.assertEqual(prompt.count("呃，这是正文。"), 1)
 
     def test_organize_preserves_segment_timestamps(self):
         record = make_record()
@@ -98,11 +100,93 @@ class AIServiceTests(unittest.TestCase):
         self.assertTrue(refreshed[0]["resolved"])
 
     def test_analysis_result_is_normalized(self):
-        client = FakeClient({"summary": "基础扎实", "overall_score": 108, "questions": None})
+        client = FakeClient(
+            {
+                "summary": "基础扎实",
+                "overall_score": 108,
+                "questions": [
+                    {
+                        "index": 1,
+                        "question": "什么是事务？",
+                        "has_answer": True,
+                        "answer_summary": "事务具有 ACID。",
+                        "score": 105,
+                        "focus_areas": ["事务特性"],
+                    }
+                ],
+            }
+        )
         result = ai_service.analyze_text("问：什么是事务？答：事务具有 ACID。", preset="backend_interview", client=client)
         self.assertEqual(result["overall_score"], 100)
-        self.assertEqual(result["questions"], [])
+        self.assertEqual(result["questions"][0]["score"], 100)
+        self.assertTrue(result["questions"][0]["has_answer"])
         self.assertEqual(result["dimensions"], [])
+
+    def test_analysis_without_answers_is_unscored_and_keeps_focus_areas(self):
+        client = FakeClient(
+            {
+                "summary": "录音只包含问题。",
+                "overall_score": 42,
+                "hiring_recommendation": "不推荐",
+                "dimensions": [{"name": "技术准确性", "score": 0}],
+                "questions": [
+                    {
+                        "index": 1,
+                        "question": "Kafka 如何保证消息可靠性？",
+                        "has_answer": False,
+                        "answer_summary": "",
+                        "score": 0,
+                        "focus_areas": ["副本机制", "确认语义"],
+                        "strengths": ["不应保留"],
+                        "weaknesses": ["不应保留"],
+                        "better_answer": "不应生成",
+                    }
+                ],
+            }
+        )
+        result = ai_service.analyze_text("Kafka 如何保证消息可靠性？", preset="backend_interview", client=client)
+        question = result["questions"][0]
+        self.assertIsNone(result["overall_score"])
+        self.assertEqual(result["hiring_recommendation"], "信息不足")
+        self.assertEqual(result["dimensions"], [])
+        self.assertIsNone(question["score"])
+        self.assertEqual(question["answer_summary"], "未识别到回答")
+        self.assertEqual(question["focus_areas"], ["副本机制", "确认语义"])
+        self.assertEqual(question["strengths"], [])
+        self.assertEqual(question["weaknesses"], [])
+        self.assertEqual(question["better_answer"], "")
+
+    def test_analysis_with_partial_answers_only_scores_answered_questions(self):
+        client = FakeClient(
+            {
+                "summary": "仅第一题有回答。",
+                "overall_score": 78,
+                "questions": [
+                    {
+                        "question": "什么是事务？",
+                        "has_answer": True,
+                        "answer_summary": "事务具有 ACID。",
+                        "score": 78,
+                    },
+                    {
+                        "question": "如何处理缓存穿透？",
+                        "has_answer": False,
+                        "score": 0,
+                        "focus_areas": ["布隆过滤器", "空值缓存"],
+                    },
+                ],
+            }
+        )
+        result = ai_service.analyze_text("什么是事务？事务具有 ACID。如何处理缓存穿透？", preset="backend_interview", client=client)
+        self.assertEqual(result["overall_score"], 78)
+        self.assertEqual(result["questions"][0]["score"], 78)
+        self.assertIsNone(result["questions"][1]["score"])
+
+    def test_analysis_prompt_requires_question_focus_when_answer_is_missing(self):
+        _, prompt = ai_service.build_analysis_prompts("请解释 Kafka ISR。", "backend_interview")
+        self.assertIn("has_answer=false", prompt)
+        self.assertIn("focus_areas", prompt)
+        self.assertIn("overall_score=null", prompt)
 
     def test_default_copy_export_does_not_use_original_filename(self):
         with tempfile.TemporaryDirectory() as directory:

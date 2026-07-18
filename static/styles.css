@@ -629,7 +629,7 @@ td.time {
   }
 }
 
-/* v1.3 · Apple-inspired intelligent content workspace */
+/* v1.4 · Apple-inspired intelligent content workspace */
 :root {
   --bg: #f2f2f7;
   --surface: rgba(255, 255, 255, 0.78);
@@ -1305,6 +1305,158 @@ textarea,
   color: var(--muted);
 }
 
+.version-diff {
+  margin-top: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.76);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.58);
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.05);
+  padding: 14px;
+}
+
+.version-diff[aria-busy="true"] .diff-text {
+  opacity: 0.68;
+}
+
+.diff-summary-bar,
+.diff-legend {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.diff-summary-bar {
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.diff-legend {
+  flex-wrap: wrap;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.diff-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.diff-legend i {
+  width: 9px;
+  height: 9px;
+  border-radius: 3px;
+}
+
+.legend-added {
+  background: rgba(0, 122, 255, 0.36);
+}
+
+.legend-removed {
+  background: rgba(255, 59, 48, 0.36);
+}
+
+.diff-stats {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: rgba(118, 118, 128, 0.08);
+  color: var(--muted-strong);
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 680;
+}
+
+.diff-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.diff-pane {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.diff-pane label {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 10px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(118, 118, 128, 0.055);
+}
+
+.diff-pane label > span {
+  color: var(--muted-strong);
+  font-size: 11px;
+  font-weight: 740;
+}
+
+.diff-pane select {
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+}
+
+.diff-text {
+  min-height: 270px;
+  max-height: 430px;
+  overflow: auto;
+  padding: 13px;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.75;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  outline: none;
+  transition: opacity 160ms ease;
+}
+
+.diff-text:focus-visible {
+  box-shadow: inset 0 0 0 3px rgba(0, 122, 255, 0.18);
+}
+
+.diff-added,
+.diff-removed {
+  border-radius: 3px;
+  padding: 1px 0;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+.diff-added {
+  background: rgba(0, 122, 255, 0.20);
+  color: #003f7d;
+}
+
+.diff-removed {
+  background: rgba(255, 59, 48, 0.20);
+  color: #7c110b;
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+
+.diff-empty {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.diff-status {
+  min-height: 18px;
+  margin: 8px 2px 0;
+}
+
+.diff-status.loading {
+  color: var(--primary-dark);
+}
+
+.diff-status.success {
+  color: var(--success);
+}
+
 .review-workspace {
   display: grid;
   grid-template-columns: minmax(0, 1.6fr) minmax(230px, 0.72fr);
@@ -1504,6 +1656,14 @@ textarea,
   font-size: 10px;
 }
 
+.score-ring.no-score {
+  background: rgba(118, 118, 128, 0.14);
+}
+
+.score-ring.no-score strong {
+  color: var(--muted-strong);
+}
+
 .recommendation {
   display: inline-flex;
   border-radius: 999px;
@@ -1602,6 +1762,13 @@ textarea,
   font-size: 12px;
 }
 
+.question-card.no-answer summary > b {
+  border-radius: 999px;
+  background: rgba(255, 159, 10, 0.12);
+  color: var(--warning);
+  padding: 3px 7px;
+}
+
 .question-body {
   border-top: 1px solid var(--border);
   padding: 12px;
@@ -1626,34 +1793,59 @@ textarea,
 }
 
 .pros-cons > div,
-.better-answer {
+.better-answer,
+.focus-areas,
+.no-answer-note {
   border-radius: 11px;
   background: rgba(118, 118, 128, 0.06);
   padding: 10px;
 }
 
 .pros-cons h4,
-.better-answer h4 {
+.better-answer h4,
+.focus-areas h4 {
   margin: 0 0 5px;
   font-size: 12px;
 }
 
 .pros-cons ul,
 .action-list ul,
-.uncertainty ul {
+.uncertainty ul,
+.focus-areas ul {
   margin: 0;
   padding-left: 18px;
 }
 
 .pros-cons li,
 .action-list li,
-.uncertainty li {
+.uncertainty li,
+.focus-areas li {
   margin: 4px 0;
 }
 
 .better-answer {
   margin-top: 9px;
   background: rgba(0, 122, 255, 0.06);
+}
+
+.focus-areas {
+  margin-top: 9px;
+  background: rgba(0, 122, 255, 0.07);
+}
+
+.no-answer-note {
+  border: 1px solid rgba(255, 159, 10, 0.18);
+  background: rgba(255, 159, 10, 0.08);
+}
+
+.no-answer-note strong {
+  color: var(--warning);
+}
+
+.no-answer-note p {
+  margin: 4px 0 0;
+  color: var(--muted-strong);
+  line-height: 1.65;
 }
 
 .action-list {
@@ -1701,7 +1893,8 @@ textarea,
   .review-workspace,
   .analysis-control,
   .dimension-grid,
-  .pros-cons {
+  .pros-cons,
+  .diff-grid {
     grid-template-columns: 1fr;
   }
 
@@ -1753,6 +1946,17 @@ textarea,
     text-align: left;
   }
 
+  .diff-summary-bar {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 7px;
+  }
+
+  .diff-text {
+    min-height: 210px;
+    max-height: 330px;
+  }
+
   .stage-label {
     font-size: 20px;
   }
@@ -1789,7 +1993,10 @@ textarea,
   .primary { background: linear-gradient(180deg, #168cff, #0a84ff); color: #fff; }
   select, textarea, .segment-input, .review-editor { background: rgba(28, 28, 30, 0.82); color: var(--text); }
   .tab.active, .source-chip { background: rgba(72, 72, 74, 0.90); }
-  .option-card, .result-surface, .review-editor-card, .analysis-result, .question-card { background: rgba(58, 58, 60, 0.52); border-color: var(--border); }
+  .option-card, .result-surface, .review-editor-card, .analysis-result, .question-card, .version-diff { background: rgba(58, 58, 60, 0.52); border-color: var(--border); }
+  .diff-pane { background: rgba(28, 28, 30, 0.74); }
+  .diff-added { background: rgba(10, 132, 255, 0.30); color: #d8ecff; }
+  .diff-removed { background: rgba(255, 69, 58, 0.30); color: #ffe1df; }
   .option-indicator { background: rgba(58, 58, 60, 0.9); }
   .score-ring::before { background: #2c2c2e; }
   .review-editor mark { color: #fff; }
@@ -1833,9 +2040,16 @@ textarea,
   .option-card,
   .result-surface,
   .review-editor-card,
-  .analysis-result {
+  .analysis-result,
+  .version-diff,
+  .diff-pane {
     border-color: var(--muted-strong);
     background: var(--surface-strong);
+  }
+
+  .diff-added,
+  .diff-removed {
+    outline: 1px solid currentColor;
   }
 
   .review-editor mark {

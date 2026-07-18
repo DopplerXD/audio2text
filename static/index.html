@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
     <title>本地音频转文字</title>
-    <link rel="stylesheet" href="/static/styles.css?v=1.3.1" />
+    <link rel="stylesheet" href="/static/styles.css?v=1.4.0" />
   </head>
   <body>
     <header class="topbar">
@@ -13,7 +13,7 @@
         <span class="brand-mark" aria-hidden="true">A2T</span>
         <div>
           <h1>本地音频转文字</h1>
-          <span class="version">v1.3 · FunASR + DeepSeek 智能处理</span>
+          <span class="version">v1.4 · FunASR + DeepSeek 智能处理</span>
         </div>
       </div>
       <div class="top-meta">
@@ -193,7 +193,33 @@
           <section class="workflow-panel" data-ai-panel="review">
             <div class="ai-section-heading">
               <div><span class="stage-label">STEP 2</span><h3>检查非常用词与语境异常</h3></div>
-              <p>AI 仅标记高置信度问题，最终修改由你决定。</p>
+              <p>先对比版本，再由 AI 标记高置信度问题。</p>
+            </div>
+            <div class="version-diff" aria-label="文本版本对比">
+              <div class="diff-summary-bar">
+                <div class="diff-legend" aria-label="差异图例">
+                  <span><i class="legend-added" aria-hidden="true"></i>左侧新增或改写</span>
+                  <span><i class="legend-removed" aria-hidden="true"></i>右侧被移除或替换</span>
+                </div>
+                <span id="diffStats" class="diff-stats">等待加载版本</span>
+              </div>
+              <div class="diff-grid">
+                <section class="diff-pane diff-pane-left">
+                  <label for="leftVersionSelect">
+                    <span>当前 / 送检版本</span>
+                    <select id="leftVersionSelect" disabled><option>等待选择记录</option></select>
+                  </label>
+                  <div id="leftDiffText" class="diff-text" tabindex="0" aria-label="左侧版本正文"></div>
+                </section>
+                <section class="diff-pane diff-pane-right">
+                  <label for="rightVersionSelect">
+                    <span>对照版本</span>
+                    <select id="rightVersionSelect" disabled><option>等待选择记录</option></select>
+                  </label>
+                  <div id="rightDiffText" class="diff-text" tabindex="0" aria-label="右侧版本正文"></div>
+                </section>
+              </div>
+              <p id="diffStatus" class="inline-status diff-status" role="status" aria-live="polite"></p>
             </div>
             <div class="action-row">
               <button id="reviewBtn" class="primary ai-action">开始检查</button>
@@ -252,6 +278,6 @@
       </aside>
     </main>
 
-    <script src="/static/app.js?v=1.3.1"></script>
+    <script src="/static/app.js?v=1.4.0"></script>
   </body>
 </html>

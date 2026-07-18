@@ -424,7 +424,8 @@ def build_analysis_prompts(text: str, preset: str) -> tuple[str, str]:
 你是一名有多年招聘和一线架构经验的资深后端开发工程师，正在进行面试复盘。
 请区分面试官和候选人，逐题评价候选人的回答；评价必须引用转写中的实际信息，不把面试官提示误当成候选人能力。
 重点考察：技术准确性、原理深度、工程实践、边界与权衡、故障意识、沟通结构。
-转写不清或没有回答时明确说明，不能替候选人补答后再据此评分。
+必须提取转写中出现的每一道明确问题，即使问题后没有候选人回答。
+转写不清或没有回答时明确说明，不能替候选人补答后再据此评分；无回答题只分析考察方向，不评价优缺点。
 """
     user_prompt = f"""场景：后端开发面试分析。
 输出以下 JSON 结构：
@@ -437,8 +438,10 @@ def build_analysis_prompts(text: str, preset: str) -> tuple[str, str]:
     {{
       "index": 1,
       "question": "题目",
+      "has_answer": true,
       "answer_summary": "候选人回答摘要",
       "score": 0,
+      "focus_areas": ["这道题考察的知识点或能力"],
       "strengths": ["优点"],
       "weaknesses": ["缺点或遗漏"],
       "better_answer": "更好的回答思路"
@@ -447,7 +450,10 @@ def build_analysis_prompts(text: str, preset: str) -> tuple[str, str]:
   "action_items": ["候选人的针对性提升建议"],
   "uncertainties": ["由转写质量或角色不明确带来的限制"]
 }}
-所有 score 范围为 0 到 100。若无法识别出成对问答，也要给出总体分析并在 uncertainties 说明。
+有回答时，所有 score 范围为 0 到 100。无回答题必须返回 has_answer=false、score=null、
+answer_summary="未识别到回答"、focus_areas 为 1 至 4 个简短考察方向，并将 strengths、weaknesses 设为空数组、better_answer 设为空字符串。
+部分题无回答时，只依据有回答题计算总体分数；若所有题都无回答，则 overall_score=null、hiring_recommendation="信息不足"、dimensions=[]，
+总体评价只概括题目覆盖方向和证据不足，不能评价候选人能力。若连问题也无法识别，在 uncertainties 中说明。
 
 <transcript>
 {text}
@@ -470,11 +476,67 @@ def analyze_text(
         max_tokens=24_000,
     )
     result["summary"] = str(result.get("summary") or "暂无总体评价。").strip()
-    result["overall_score"] = round(min(max(_as_float(result.get("overall_score"), 0), 0), 100))
-    for field in ("dimensions", "questions", "action_items", "uncertainties"):
+    raw_questions = result.get("questions") if isinstance(result.get("questions"), list) else []
+    questions = [_normalize_analysis_question(item, index) for index, item in enumerate(raw_questions, start=1)]
+    questions = [item for item in questions if item]
+    answered_scores = [
+        int(item["score"])
+        for item in questions
+        if item.get("has_answer") and item.get("score") is not None
+    ]
+    if not answered_scores:
+        result["overall_score"] = None
+        result["hiring_recommendation"] = "信息不足"
+        result["dimensions"] = []
+    else:
+        default_score = sum(answered_scores) / len(answered_scores) if answered_scores else 0
+        result["overall_score"] = _normalize_score(result.get("overall_score"), default_score)
+        result["dimensions"] = result.get("dimensions") if isinstance(result.get("dimensions"), list) else []
+    result["questions"] = questions
+    for field in ("action_items", "uncertainties"):
         if not isinstance(result.get(field), list):
             result[field] = []
     return result
+
+
+def _normalize_analysis_question(raw: Any, fallback_index: int) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    question = str(raw.get("question") or "").strip()
+    if not question:
+        return None
+    answer_summary = str(raw.get("answer_summary") or "").strip()
+    raw_has_answer = raw.get("has_answer")
+    if isinstance(raw_has_answer, bool):
+        has_answer = raw_has_answer
+    else:
+        has_answer = bool(answer_summary and "未识别到回答" not in answer_summary and "没有回答" not in answer_summary)
+    focus_areas = _string_list(raw.get("focus_areas"))[:4]
+    try:
+        index = int(raw.get("index") or fallback_index)
+    except (TypeError, ValueError):
+        index = fallback_index
+    return {
+        "index": index,
+        "question": question,
+        "has_answer": has_answer,
+        "answer_summary": answer_summary or ("暂无回答摘要。" if has_answer else "未识别到回答"),
+        "score": _normalize_score(raw.get("score"), 0) if has_answer else None,
+        "focus_areas": focus_areas,
+        "strengths": _string_list(raw.get("strengths")) if has_answer else [],
+        "weaknesses": _string_list(raw.get("weaknesses")) if has_answer else [],
+        "better_answer": str(raw.get("better_answer") or "").strip() if has_answer else "",
+    }
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _normalize_score(value: Any, default: float = 0) -> int:
+    return round(min(max(_as_float(value, default), 0), 100))
 
 
 def _as_float(value: Any, default: float) -> float:

@@ -9,7 +9,7 @@ load_dotenv(BASE_DIR / ".env")
 
 
 APP_NAME = "本地音频转文字"
-APP_VERSION = "v1.3"
+APP_VERSION = "v1.4"
 HOST = "127.0.0.1"
 PORT = 7860
 

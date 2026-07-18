@@ -52,6 +52,7 @@ def init_db() -> None:
                 duration REAL,
                 elapsed_seconds REAL,
                 text TEXT NOT NULL DEFAULT '',
+                initial_text TEXT NOT NULL DEFAULT '',
                 segments_json TEXT NOT NULL DEFAULT '[]',
                 error_message TEXT,
                 created_at TEXT NOT NULL,
@@ -78,6 +79,32 @@ def init_db() -> None:
         )
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_ai_runs_record_stage ON ai_runs(record_id, stage, id DESC)"
+        )
+        record_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(records)").fetchall()
+        }
+        if "initial_text" not in record_columns:
+            connection.execute(
+                "ALTER TABLE records ADD COLUMN initial_text TEXT NOT NULL DEFAULT ''"
+            )
+        connection.execute(
+            """
+            UPDATE records
+            SET initial_text = COALESCE(
+                NULLIF((
+                    SELECT source_text
+                    FROM ai_runs
+                    WHERE ai_runs.record_id = records.id
+                      AND source_text <> ''
+                    ORDER BY ai_runs.id ASC
+                    LIMIT 1
+                ), ''),
+                text,
+                ''
+            )
+            WHERE initial_text = ''
+            """
         )
         connection.execute(
             """
@@ -149,6 +176,7 @@ def _row_to_record(
         duration=row["duration"],
         elapsed_seconds=row["elapsed_seconds"],
         text=row["text"] or "",
+        initial_text=row["initial_text"] or row["text"] or "",
         segments=[Segment.from_dict(segment) for segment in segments_data],
         export_files=export_files,
         error_message=row["error_message"],
@@ -194,6 +222,8 @@ def create_record(
 def update_record(record_id: str, **fields: Any) -> None:
     if not fields:
         return
+    if "initial_text" in fields:
+        raise ValueError("initial_text 是不可变字段，请使用 set_initial_text_if_empty。")
     fields["updated_at"] = now_iso()
     if "segments" in fields:
         fields["segments_json"] = _segments_to_json(fields.pop("segments"))
@@ -201,6 +231,15 @@ def update_record(record_id: str, **fields: Any) -> None:
     values = list(fields.values()) + [record_id]
     with db_connection() as connection:
         connection.execute(f"UPDATE records SET {assignments} WHERE id = ?", values)
+
+
+def set_initial_text_if_empty(record_id: str, text: str) -> None:
+    normalized = str(text or "")
+    with db_connection() as connection:
+        connection.execute(
+            "UPDATE records SET initial_text = ? WHERE id = ? AND initial_text = ''",
+            (normalized, record_id),
+        )
 
 
 def list_records() -> list[TranscriptionRecord]:

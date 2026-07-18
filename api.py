@@ -13,6 +13,7 @@ import audio_utils
 import ai_service
 import exporters
 import storage
+import versioning
 from config import (
     ALL_EXPORT_FORMATS,
     APP_NAME,
@@ -122,6 +123,7 @@ async def create_transcription(
             duration=duration,
         )
         elapsed = round(time.perf_counter() - start, 3)
+        storage.set_initial_text_if_empty(record_id, result.text)
         storage.update_record(
             record_id,
             temp_audio_path=str(wav_path),
@@ -149,6 +151,27 @@ def get_transcriptions() -> list[dict[str, Any]]:
 @router.get("/transcriptions/{record_id}")
 def get_transcription(record_id: str) -> dict[str, Any]:
     return _record_or_404(record_id).to_dict()
+
+
+@router.get("/transcriptions/{record_id}/versions")
+def get_transcription_versions(record_id: str) -> dict[str, Any]:
+    record = _record_or_404(record_id)
+    return {"versions": versioning.list_text_versions(record)}
+
+
+@router.post("/transcriptions/{record_id}/versions/diff")
+def diff_transcription_versions(record_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    record = _record_or_404(record_id)
+    left_version_id = str(payload.get("left_version_id") or "").strip()
+    right_version_id = str(payload.get("right_version_id") or "").strip()
+    if not left_version_id or not right_version_id:
+        raise HTTPException(status_code=400, detail="必须同时选择左右两个文本版本。")
+    try:
+        left = versioning.resolve_text_version(record, left_version_id)
+        right = versioning.resolve_text_version(record, right_version_id)
+    except versioning.VersionLookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return versioning.compare_text_versions(left, right)
 
 
 @router.patch("/transcriptions/{record_id}")

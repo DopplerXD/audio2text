@@ -114,6 +114,7 @@ class TranscriptionRecord:
     error_message: str | None
     created_at: str
     updated_at: str
+    initial_text: str = ""
     ai_runs: list[AIRun] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -133,6 +134,7 @@ class TranscriptionRecord:
             "duration": self.duration,
             "elapsed_seconds": self.elapsed_seconds,
             "text": self.text,
+            "initial_text": self.initial_text,
             "segments": [segment.to_dict() for segment in self.segments],
             "export_files": [export_file.to_dict() for export_file in self.export_files],
             "error_message": self.error_message,

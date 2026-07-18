@@ -1,6 +1,6 @@
 # 本地音频转文字
 
-一个本地运行的音频/视频转写与智能内容处理工具。当前版本为 v1.3：FunASR + Paraformer-zh 在本地完成中文识别，DeepSeek V4 Flash 可继续执行智能整理、语境检查和场景化分析。
+一个本地运行的音频/视频转写与智能内容处理工具。当前版本为 v1.4：FunASR + Paraformer-zh 在本地完成中文识别，DeepSeek V4 Flash 可继续执行智能整理、版本对比、语境检查和场景化分析。
 
 ## 功能
 
@@ -16,7 +16,8 @@
 - 默认仅启用“口水词去除 + 另存为新文件”，不会改动原始识别结果
 - 可同步处理字幕分段并生成 SRT/VTT，可额外保存 Markdown
 - 人工检查会标记不符合语境的非常用词，编辑标记片段后高亮自动解除
-- 后端开发面试分析提供总体评价、维度评分、逐题优缺点和改进思路
+- STEP 2 可在左右两侧选择最初版、整理版本和检查版本，查看中文/英文术语级 Diff；左侧版本同时作为送检来源
+- 后端开发面试分析提供总体评价、维度评分、逐题优缺点和改进思路；未识别到回答时改为展示题目考察方向且不评分
 
 ## 环境要求
 
@@ -120,6 +121,7 @@ audio2text/
 ├── models.py              # 数据结构
 ├── storage.py             # SQLite 持久化
 ├── transcriber.py         # FunASR 识别和结果适配
+├── versioning.py          # 文本版本解析与中英文 Diff
 ├── static/
 │   ├── index.html
 │   ├── styles.css
@@ -148,6 +150,8 @@ test_data/
 - `POST /api/transcriptions`
 - `GET /api/transcriptions`
 - `GET /api/transcriptions/{id}`
+- `GET /api/transcriptions/{id}/versions`
+- `POST /api/transcriptions/{id}/versions/diff`
 - `PATCH /api/transcriptions/{id}`
 - `DELETE /api/transcriptions/{id}`
 - `POST /api/transcriptions/{id}/exports`
@@ -161,7 +165,7 @@ test_data/
 ## 开发检查
 
 ```bash
-python3 -m py_compile app.py api.py ai_service.py models.py config.py audio_utils.py transcriber.py storage.py exporters.py
+python3 -m py_compile app.py api.py ai_service.py versioning.py models.py config.py audio_utils.py transcriber.py storage.py exporters.py
 ```
 
 运行自动化测试：
