@@ -10,13 +10,15 @@
 - 使用 FunASR `paraformer-zh + fsmn-vad + ct-punc` 完成中文识别、VAD 分段和标点处理
 - 使用 SQLite 保存历史记录，重启后仍可查看
 - 支持编辑完整文本和字幕分段
-- 支持导出 TXT、Markdown、PDF、SRT、VTT、JSON
-- 支持一键导出全部格式并打包 ZIP
+- 支持经二次确认后导出 TXT、Markdown、PDF、SRT、VTT、JSON
+- 支持经二次确认后一键导出全部格式并打包 ZIP
+- 导出列表支持全选、批量 ZIP 下载及二次确认删除，并可单独选择 AI 智能整理结果
 - 智能整理可组合口水词去除、书面化改写、计算机术语修正和 Qn/An/Rn 问答分离
 - 默认仅启用“口水词去除 + 另存为新文件”，不会改动原始识别结果
 - 可同步处理字幕分段并生成 SRT/VTT，可额外保存 Markdown
 - 人工检查会标记不符合语境的非常用词，编辑标记片段后高亮自动解除
-- STEP 2 可在左右两侧选择最初版、整理版本和检查版本，查看中文/英文术语级 Diff；左侧版本同时作为送检来源
+- STEP 2 检查前仅展示可选择的送检正文；检查后保留已保存版本 Diff，并提供“只读手动修改 Diff + 可编辑正文”双栏实时对比
+- STEP 2 手动修改提供明确的未保存状态与保存入口；已保存版本可在“导出结果”中选择并生成 TXT、Markdown、PDF 或 JSON
 - 后端开发面试分析提供总体评价、维度评分、逐题优缺点和改进思路；未识别到回答时改为展示题目考察方向且不评分
 
 ## 环境要求
@@ -66,6 +68,14 @@ python3 -m pip install -r requirements.txt
 首次识别时，FunASR 会下载模型文件，耗时取决于网络和机器性能。
 
 > 隐私提示：音频识别在本地完成；只有在点击智能整理、人工检查或智能分析时，相应文字内容才会发送至配置的 DeepSeek API。请确认内容符合你的数据处理要求。
+
+## 开源模型与第三方许可证
+
+- 本地使用的 `paraformer-zh`、`fsmn-vad` 和 `ct-punc` 模型由 FunASR 在首次运行时下载，模型权重不包含在本仓库中；对应官方模型卡当前均标注为 Apache-2.0。
+- FunASR 工具包采用 MIT License。工具包代码与预训练模型权重分别授权。
+- `deepseek-v4-flash` 通过 DeepSeek API 远程调用，不作为开源模型权重随本项目分发，其使用受 DeepSeek 开放平台服务条款约束。
+
+模型来源、许可证链接、再分发注意事项及本项目自身的许可证状态见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ## 启动与停止
 
@@ -127,6 +137,7 @@ audio2text/
 │   ├── styles.css
 │   └── app.js
 ├── requirements.txt
+├── THIRD_PARTY_NOTICES.md # 模型来源、第三方许可证与再分发说明
 ├── .env.example           # DeepSeek 环境配置模板
 ├── tests/                 # AI、持久化与 API 自动化测试
 └── README.md
@@ -159,6 +170,7 @@ test_data/
 - `POST /api/transcriptions/{id}/ai/organize`
 - `POST /api/transcriptions/{id}/ai/review`
 - `PATCH /api/transcriptions/{id}/ai/reviews/{run_id}`
+- `POST /api/transcriptions/{id}/ai/reviews/{run_id}/exports`
 - `POST /api/transcriptions/{id}/ai/analyze`
 - `GET /api/files/{file_id}`
 

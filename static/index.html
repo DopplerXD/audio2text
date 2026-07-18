@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
     <title>本地音频转文字</title>
-    <link rel="stylesheet" href="/static/styles.css?v=1.4.0" />
+    <link rel="stylesheet" href="/static/styles.css?v=1.4.6" />
   </head>
   <body>
     <header class="topbar">
@@ -193,33 +193,15 @@
           <section class="workflow-panel" data-ai-panel="review">
             <div class="ai-section-heading">
               <div><span class="stage-label">STEP 2</span><h3>检查非常用词与语境异常</h3></div>
-              <p>先对比版本，再由 AI 标记高置信度问题。</p>
+              <p>选择送检版本；检查完成后再显示差异与异常标记。</p>
             </div>
-            <div class="version-diff" aria-label="文本版本对比">
-              <div class="diff-summary-bar">
-                <div class="diff-legend" aria-label="差异图例">
-                  <span><i class="legend-added" aria-hidden="true"></i>左侧新增或改写</span>
-                  <span><i class="legend-removed" aria-hidden="true"></i>右侧被移除或替换</span>
-                </div>
-                <span id="diffStats" class="diff-stats">等待加载版本</span>
-              </div>
-              <div class="diff-grid">
-                <section class="diff-pane diff-pane-left">
-                  <label for="leftVersionSelect">
-                    <span>当前 / 送检版本</span>
-                    <select id="leftVersionSelect" disabled><option>等待选择记录</option></select>
-                  </label>
-                  <div id="leftDiffText" class="diff-text" tabindex="0" aria-label="左侧版本正文"></div>
-                </section>
-                <section class="diff-pane diff-pane-right">
-                  <label for="rightVersionSelect">
-                    <span>对照版本</span>
-                    <select id="rightVersionSelect" disabled><option>等待选择记录</option></select>
-                  </label>
-                  <div id="rightDiffText" class="diff-text" tabindex="0" aria-label="右侧版本正文"></div>
-                </section>
-              </div>
-              <p id="diffStatus" class="inline-status diff-status" role="status" aria-live="polite"></p>
+            <div class="review-source-card" aria-label="当前送检版本">
+              <label for="leftVersionSelect">
+                <span>当前 / 送检版本</span>
+                <select id="leftVersionSelect" disabled><option>等待选择记录</option></select>
+              </label>
+              <div id="sourcePreview" class="source-preview-text" tabindex="0" aria-label="送检版本正文"></div>
+              <p class="source-preview-hint">检查前仅展示送检正文，不添加任何差异或异常标记。</p>
             </div>
             <div class="action-row">
               <button id="reviewBtn" class="primary ai-action">开始检查</button>
@@ -228,11 +210,62 @@
             <div id="reviewWorkspace" class="review-workspace hidden">
               <div class="review-editor-card">
                 <div class="result-header">
-                  <div><span class="eyebrow">可编辑正文</span><h3><span id="issueCount">0</span> 处待确认</h3></div>
-                  <button id="saveReviewBtn">保存检查修改</button>
+                  <div><span class="eyebrow">检查与修改</span><h3><span id="issueCount">0</span> 处待确认</h3></div>
                 </div>
-                <div id="reviewEditor" class="review-editor" contenteditable="true" spellcheck="false" aria-label="带异常标记的可编辑正文"></div>
-                <p class="editor-hint">直接修改红色片段，标记会立即消失；也可在右侧采用建议。</p>
+                <section id="postReviewDiff" class="review-unified-diff" aria-label="已保存版本差异" aria-busy="false">
+                  <div class="diff-result-header">
+                    <div>
+                      <span class="eyebrow">已保存版本差异</span>
+                      <div class="diff-legend" aria-label="差异图例">
+                        <span><i class="legend-added" aria-hidden="true"></i>新增或改写</span>
+                        <span><i class="legend-removed" aria-hidden="true"></i>删除或替换</span>
+                      </div>
+                    </div>
+                    <label for="rightVersionSelect">
+                      <span>对照版本</span>
+                      <select id="rightVersionSelect" disabled><option>等待检查结果</option></select>
+                    </label>
+                  </div>
+                  <div class="diff-result-meta">
+                    <span id="diffStats" class="diff-stats">等待检查结果</span>
+                    <p id="diffStatus" class="inline-status diff-status" role="status" aria-live="polite"></p>
+                  </div>
+                  <div id="unifiedDiffText" class="diff-text unified-diff-text" tabindex="0" aria-label="统一版本差异正文"></div>
+                </section>
+                <section class="review-edit-compare" aria-label="本次手动修改实时对比">
+                  <div class="review-edit-compare-header">
+                    <div>
+                      <span class="eyebrow">本次手动修改</span>
+                      <p>左侧固定对比 AI 检查初稿，右侧用于直接修改。</p>
+                    </div>
+                    <div class="diff-legend" aria-label="手动修改差异图例">
+                      <span><i class="legend-added" aria-hidden="true"></i>新增或改写</span>
+                      <span><i class="legend-removed" aria-hidden="true"></i>删除或替换</span>
+                    </div>
+                  </div>
+                  <div class="review-edit-grid">
+                    <section id="reviewEditDiffSurface" class="review-edit-pane review-edit-pane-readonly" aria-label="手动修改差异" aria-busy="false">
+                      <div class="review-edit-pane-header">
+                        <div><strong>手动修改差异</strong><span>只读</span></div>
+                        <span id="reviewEditDiffStats" class="diff-stats">内容一致</span>
+                      </div>
+                      <div id="reviewEditDiffText" class="diff-text review-edit-diff-text" tabindex="0" aria-label="只读手动修改差异正文"></div>
+                      <p id="reviewEditDiffStatus" class="inline-status review-edit-diff-status" role="status" aria-live="polite"></p>
+                    </section>
+                    <section class="review-edit-pane review-edit-pane-editor" aria-label="可编辑正文">
+                      <div class="review-edit-pane-header">
+                        <div><strong>可编辑正文</strong><span>修改后需要显式保存</span></div>
+                        <span id="reviewSaveState" class="review-save-state" data-state="saved"><i aria-hidden="true"></i>已保存</span>
+                      </div>
+                      <div id="reviewEditor" class="review-editor" contenteditable="true" spellcheck="false" aria-label="带异常标记的可编辑正文"></div>
+                      <p class="editor-hint">直接修改红色异常片段，标记会立即消失；左侧会实时显示本次修改。</p>
+                      <div class="review-result-controls review-save-controls" aria-label="STEP 2 保存操作">
+                        <button id="saveReviewBtn" class="primary">保存 STEP 2 结果</button>
+                      </div>
+                      <p id="reviewActionStatus" class="inline-status review-action-status" role="status" aria-live="polite">保存后可在“导出结果”中选择该 STEP 2 版本。</p>
+                    </section>
+                  </div>
+                </section>
               </div>
               <aside id="issueList" class="issue-list" aria-label="待检查问题"></aside>
             </div>
@@ -261,12 +294,42 @@
         </section>
 
         <section id="tab-exports" class="tab-panel" role="tabpanel">
+          <div class="export-heading">
+            <div><span class="eyebrow">格式导出</span><h3>选择需要生成的文件</h3></div>
+            <p>选择格式后将在确认窗口中核对，确认前不会生成文件。</p>
+          </div>
+          <section class="export-source-card" aria-labelledby="exportSourceTitle">
+            <div class="export-source-copy">
+              <span class="eyebrow">导出内容</span>
+              <strong id="exportSourceTitle">选择正文来源</strong>
+              <p id="exportSourceDescription">当前识别结果。</p>
+            </div>
+            <label for="exportSourceSelect">
+              <span>内容来源</span>
+              <select id="exportSourceSelect" disabled>
+                <option value="record">当前识别结果</option>
+              </select>
+            </label>
+          </section>
           <div class="export-actions">
             <button data-export="txt">TXT</button><button data-export="md">Markdown</button>
             <button data-export="pdf">PDF</button><button data-export="srt">SRT</button>
             <button data-export="vtt">VTT</button><button data-export="json">JSON</button>
             <button id="exportAllBtn" class="primary">全部 ZIP</button>
           </div>
+          <p id="exportFormatHint" class="export-format-hint">当前识别结果支持全部格式。</p>
+          <div id="exportBatchToolbar" class="export-batch-toolbar hidden" aria-label="导出文件批量操作">
+            <label class="export-select-all" for="selectAllExports">
+              <input id="selectAllExports" type="checkbox" />
+              <span>全选</span>
+            </label>
+            <span id="exportSelectionCount" class="export-selection-count">已选择 0 个文件</span>
+            <div class="export-batch-actions">
+              <button id="downloadSelectedExportsBtn" disabled>打包下载所选</button>
+              <button id="deleteSelectedExportsBtn" class="danger-button" disabled>删除所选</button>
+            </div>
+          </div>
+          <p id="exportBatchStatus" class="inline-status export-batch-status" role="status" aria-live="polite"></p>
           <div id="exportList" class="export-list"></div>
         </section>
       </section>
@@ -278,6 +341,37 @@
       </aside>
     </main>
 
-    <script src="/static/app.js?v=1.4.0"></script>
+    <dialog id="exportConfirmDialog" class="export-confirm-dialog" aria-labelledby="exportConfirmTitle" aria-describedby="exportConfirmDescription" aria-busy="false">
+      <form class="export-confirm-card">
+        <div class="export-confirm-icon" aria-hidden="true">↓</div>
+        <span class="eyebrow">确认导出</span>
+        <h2 id="exportConfirmTitle">生成导出文件？</h2>
+        <p id="exportConfirmDescription">确认后才会生成所选文件。</p>
+        <dl class="export-confirm-details">
+          <div><dt>当前记录</dt><dd id="exportConfirmRecord">-</dd></div>
+          <div><dt>生成内容</dt><dd id="exportConfirmScope">-</dd></div>
+        </dl>
+        <div class="export-confirm-actions">
+          <button id="cancelExportBtn" type="button">取消</button>
+          <button id="confirmExportBtn" class="primary" type="button">确认生成</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="deleteExportDialog" class="export-confirm-dialog export-delete-dialog" aria-labelledby="deleteExportTitle" aria-describedby="deleteExportDescription" aria-busy="false">
+      <form class="export-confirm-card">
+        <div class="export-confirm-icon delete-icon" aria-hidden="true">×</div>
+        <span class="eyebrow danger-text">确认删除</span>
+        <h2 id="deleteExportTitle">删除导出文件？</h2>
+        <p id="deleteExportDescription">文件将从磁盘和导出列表中永久删除，此操作无法撤销。</p>
+        <ul id="deleteExportList" class="delete-export-list" aria-label="即将删除的文件"></ul>
+        <div class="export-confirm-actions">
+          <button id="cancelDeleteExportBtn" type="button">取消</button>
+          <button id="confirmDeleteExportBtn" class="danger-button" type="button">确认删除</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script src="/static/app.js?v=1.4.6"></script>
   </body>
 </html>

@@ -12,7 +12,15 @@ const state = {
   rightVersionId: null,
   versionLoadId: 0,
   diffRequestId: 0,
-  diffScrollSync: false,
+  reviewEditDiffRequestId: 0,
+  reviewEditDiffTimer: null,
+  reviewEditScrollSync: false,
+  reviewSaveBusy: false,
+  pendingExport: null,
+  pendingExportDeletion: null,
+  selectedExportIds: new Set(),
+  exportSourceId: "record",
+  exportBusy: false,
   busy: new Set(),
 };
 
@@ -21,6 +29,17 @@ const AI_BUTTON_LABELS = {
   review: { idle: "开始检查", busy: "正在检查…" },
   analysis: { idle: "生成面试分析", busy: "正在分析…" },
 };
+
+const EXPORT_FORMAT_LABELS = {
+  txt: "TXT 文本",
+  md: "Markdown 文档",
+  pdf: "PDF 文档",
+  srt: "SRT 字幕",
+  vtt: "VTT 字幕",
+  json: "JSON 数据",
+};
+
+const REVIEW_EXPORT_FORMATS = new Set(["txt", "md", "pdf", "json"]);
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
@@ -74,6 +93,19 @@ function formatTime(seconds) {
   const secs = Math.floor((ms % 60000) / 1000);
   const millis = ms % 1000;
   return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(secs).padStart(2, "0")}.${String(millis).padStart(3, "0")}`;
+}
+
+function exportFilePresentation(file) {
+  const rawFormat = String(file?.format || "");
+  if (rawFormat.startsWith("ai-review-")) {
+    const format = rawFormat.replace(/^ai-review-/, "");
+    return { format, source: "STEP 2 修改", sourceClass: "review", isAI: true };
+  }
+  if (rawFormat.startsWith("ai-")) {
+    const format = rawFormat.replace(/^ai-/, "");
+    return { format, source: "AI 整理", sourceClass: "ai", isAI: true };
+  }
+  return { format: rawFormat, source: "常规导出", sourceClass: "", isAI: false };
 }
 
 function escapeHtml(value) {
@@ -154,6 +186,9 @@ async function loadRecords() {
 async function loadRecord(id) {
   const record = await api(`/api/transcriptions/${encodeURIComponent(id)}`);
   state.currentRecord = record;
+  state.selectedExportIds.clear();
+  state.exportSourceId = "record";
+  setInlineStatus("#exportBatchStatus", "", "neutral");
   resetVersionComparison();
   renderCurrentRecord();
   await loadTextVersions({ resetDefaults: true });
@@ -193,6 +228,7 @@ function renderCurrentRecord() {
   $("#textStats").textContent = `字数 ${(record.text || "").length} · 分段 ${(record.segments || []).length} · 语言 ${record.language || "-"}`;
   renderSegments();
   renderExports();
+  renderExportSourceOptions();
   renderInfo();
   hydrateAIWorkspace();
   renderHistory();
@@ -221,25 +257,153 @@ function renderSegments() {
 function renderExports() {
   const list = $("#exportList");
   const files = state.currentRecord?.export_files || [];
+  const availableIds = new Set(files.map((file) => Number(file.id)));
+  state.selectedExportIds = new Set(
+    Array.from(state.selectedExportIds).filter((fileId) => availableIds.has(Number(fileId))),
+  );
   if (!files.length) {
     list.innerHTML = '<p class="message">暂无导出文件</p>';
+    $("#exportBatchToolbar").classList.add("hidden");
+    updateExportSelectionUI();
     return;
   }
+  $("#exportBatchToolbar").classList.remove("hidden");
   list.innerHTML = "";
   files.forEach((file) => {
+    const fileId = Number(file.id);
+    const presentation = exportFilePresentation(file);
+    const baseFormat = presentation.format;
+    const formatLabel = baseFormat === "md" ? "Markdown" : baseFormat.toUpperCase();
     const item = document.createElement("div");
-    item.className = "export-item";
+    item.className = `export-item${state.selectedExportIds.has(fileId) ? " is-selected" : ""}`;
+    item.dataset.exportFileId = String(fileId);
     item.innerHTML = `
-      <strong>${escapeHtml(file.format.toUpperCase())}</strong>
+      <label class="export-row-select">
+        <input type="checkbox" data-export-select="${fileId}" aria-label="选择 ${escapeHtml(file.filename)}"${state.selectedExportIds.has(fileId) ? " checked" : ""} />
+      </label>
+      <span class="export-file-kind">
+        <strong>${escapeHtml(formatLabel)}</strong>
+        <span class="export-source-badge${presentation.sourceClass ? ` ${presentation.sourceClass}` : ""}">${escapeHtml(presentation.source)}</span>
+      </span>
       <span class="path" title="${escapeHtml(file.absolute_path || file.path)}">${escapeHtml(file.path)}</span>
-      <span>${formatBytes(file.size)}</span>
+      <span class="export-file-size">${formatBytes(file.size)}</span>
       <span class="file-actions">
-        <button data-copy="${escapeHtml(file.absolute_path || file.path)}" class="compact">复制路径</button>
-        <a class="button-link compact" href="/api/files/${file.id}">下载</a>
+        <button data-copy="${escapeHtml(file.absolute_path || file.path)}" class="compact" aria-label="复制 ${escapeHtml(file.filename)} 的路径">复制路径</button>
+        <a class="button-link compact" href="/api/files/${file.id}" aria-label="下载 ${escapeHtml(file.filename)}">下载</a>
+        <button data-delete-export="${fileId}" class="compact delete-export-button" aria-label="删除 ${escapeHtml(file.filename)}">删除</button>
       </span>
     `;
     list.appendChild(item);
   });
+  updateExportSelectionUI();
+}
+
+function selectedExportSource() {
+  const sourceId = String(state.exportSourceId || "record");
+  const match = sourceId.match(/^review:(\d+)$/);
+  if (!match) return { source: "record", runId: null, version: null };
+  const runId = Number(match[1]);
+  const run = (state.currentRecord?.ai_runs || []).find(
+    (item) => item.stage === "review" && Number(item.id) === runId,
+  );
+  const version = state.textVersions.find((item) => item.id === sourceId) || null;
+  if (!run || !version) return { source: "record", runId: null, version: null };
+  return { source: "review", runId, version, run };
+}
+
+function renderExportSourceOptions() {
+  const select = $("#exportSourceSelect");
+  const record = state.currentRecord;
+  select.innerHTML = '<option value="record">当前识别结果</option>';
+  const reviewVersions = state.textVersions.filter((version) => version.stage === "review");
+  reviewVersions.forEach((version) => {
+    const option = document.createElement("option");
+    option.value = version.id;
+    option.textContent = version.label;
+    select.appendChild(option);
+  });
+  const availableIds = new Set(["record", ...reviewVersions.map((version) => version.id)]);
+  if (!availableIds.has(state.exportSourceId)) state.exportSourceId = "record";
+  select.value = state.exportSourceId;
+  select.disabled = !record;
+  updateExportFormatAvailability();
+}
+
+function updateExportFormatAvailability() {
+  const selection = selectedExportSource();
+  const isReview = selection.source === "review";
+  $$('[data-export]').forEach((button) => {
+    const supported = !isReview || REVIEW_EXPORT_FORMATS.has(button.dataset.export);
+    button.disabled = state.exportBusy || !state.currentRecord || !supported;
+    button.title = supported ? "" : "STEP 2 修改结果未同步字幕时间轴，不支持该格式。";
+  });
+  $("#exportAllBtn").disabled = state.exportBusy || !state.currentRecord || isReview;
+  $("#exportAllBtn").title = isReview ? "STEP 2 修改结果仅支持 TXT、Markdown、PDF 和 JSON。" : "";
+  if (!state.currentRecord) {
+    $("#exportSourceDescription").textContent = "请先选择一条识别记录。";
+    $("#exportFormatHint").textContent = "选择记录后可生成导出文件。";
+    return;
+  }
+  if (!isReview) {
+    $("#exportSourceDescription").textContent = `当前识别结果 · ${String(state.currentRecord.text || "").length} 字。`;
+    $("#exportFormatHint").textContent = "当前识别结果支持全部格式。";
+    return;
+  }
+  const hasUnsavedDraft = Number(state.currentReview?.id) === Number(selection.runId)
+    && reviewHasUnsavedChanges();
+  $("#exportSourceDescription").textContent = hasUnsavedDraft
+    ? `已保存的 STEP 2 版本 #${selection.runId} · ${String(selection.version.text || "").length} 字。当前编辑区仍有未保存修改，不会纳入本次导出。`
+    : `已保存的 STEP 2 人工修改版本 #${selection.runId} · ${String(selection.version.text || "").length} 字。`;
+  $("#exportFormatHint").textContent = "STEP 2 结果支持 TXT、Markdown、PDF 和 JSON；由于未同步时间轴，SRT、VTT 与全部 ZIP 不可用。";
+}
+
+function handleExportSourceChange() {
+  state.exportSourceId = $("#exportSourceSelect").value || "record";
+  updateExportFormatAvailability();
+  setInlineStatus("#exportBatchStatus", "", "neutral");
+}
+
+function selectedExportFiles() {
+  const selectedIds = state.selectedExportIds;
+  return (state.currentRecord?.export_files || []).filter((file) => selectedIds.has(Number(file.id)));
+}
+
+function updateExportSelectionUI() {
+  const files = state.currentRecord?.export_files || [];
+  const availableIds = new Set(files.map((file) => Number(file.id)));
+  state.selectedExportIds = new Set(
+    Array.from(state.selectedExportIds).filter((fileId) => availableIds.has(Number(fileId))),
+  );
+  const selectedCount = state.selectedExportIds.size;
+  const selectAll = $("#selectAllExports");
+  selectAll.checked = files.length > 0 && selectedCount === files.length;
+  selectAll.indeterminate = selectedCount > 0 && selectedCount < files.length;
+  selectAll.disabled = state.exportBusy || !files.length;
+  $("#exportSelectionCount").textContent = `已选择 ${selectedCount} 个文件`;
+  $("#downloadSelectedExportsBtn").disabled = state.exportBusy || selectedCount === 0;
+  $("#deleteSelectedExportsBtn").disabled = state.exportBusy || selectedCount === 0;
+  $$("[data-export-select]").forEach((checkbox) => {
+    const selected = state.selectedExportIds.has(Number(checkbox.dataset.exportSelect));
+    checkbox.checked = selected;
+    checkbox.disabled = state.exportBusy;
+    checkbox.closest(".export-item")?.classList.toggle("is-selected", selected);
+  });
+  $$("[data-delete-export]").forEach((button) => { button.disabled = state.exportBusy; });
+}
+
+function toggleAllExports(checked) {
+  const files = state.currentRecord?.export_files || [];
+  state.selectedExportIds = checked
+    ? new Set(files.map((file) => Number(file.id)))
+    : new Set();
+  updateExportSelectionUI();
+}
+
+function handleExportSelectionChange(checkbox) {
+  const fileId = Number(checkbox.dataset.exportSelect);
+  if (checkbox.checked) state.selectedExportIds.add(fileId);
+  else state.selectedExportIds.delete(fileId);
+  updateExportSelectionUI();
 }
 
 function renderInfo() {
@@ -285,16 +449,16 @@ function resetVersionComparison() {
   state.textVersions = [];
   state.leftVersionId = null;
   state.rightVersionId = null;
+  state.currentReview = null;
   state.versionLoadId += 1;
   state.diffRequestId += 1;
   [$("#leftVersionSelect"), $("#rightVersionSelect")].forEach((select) => {
     select.disabled = true;
     select.innerHTML = "<option>正在加载版本…</option>";
   });
-  $("#leftDiffText").textContent = "";
-  $("#rightDiffText").textContent = "";
-  $("#diffStats").textContent = "等待加载版本";
-  setInlineStatus("#diffStatus", "", "neutral");
+  $("#sourcePreview").textContent = "正在加载文本版本…";
+  clearPostReviewDiff();
+  clearReviewEditDiff();
   updateAIAvailability();
 }
 
@@ -320,7 +484,7 @@ async function loadTextVersions({ preferLeftId = null, resetDefaults = false, re
   const recordId = state.currentRecord?.id;
   if (!recordId) return;
   const loadId = ++state.versionLoadId;
-  setInlineStatus("#diffStatus", "正在加载文本版本…", "loading");
+  $("#sourcePreview").textContent = "正在加载文本版本…";
   try {
     const response = await api(`/api/transcriptions/${encodeURIComponent(recordId)}/versions`);
     if (state.currentRecord?.id !== recordId || loadId !== state.versionLoadId) return;
@@ -339,42 +503,169 @@ async function loadTextVersions({ preferLeftId = null, resetDefaults = false, re
       state.rightVersionId = (resetRightToOriginal ? original : previousRight || original)?.id || state.leftVersionId;
     }
     renderVersionSelectors();
+    renderSourcePreview();
+    syncReviewForSelectedVersion();
+    renderExportSourceOptions();
     updateAIAvailability();
-    await refreshVersionDiff();
   } catch (error) {
     if (state.currentRecord?.id !== recordId || loadId !== state.versionLoadId) return;
-    setInlineStatus("#diffStatus", error.message, "error");
-    $("#diffStats").textContent = "版本加载失败";
+    $("#sourcePreview").textContent = error.message;
+    clearPostReviewDiff();
+    renderExportSourceOptions();
     updateAIAvailability();
   }
 }
 
-function renderDiffText(chunks, side) {
-  const textKey = side === "left" ? "left_text" : "right_text";
+function renderSourcePreview() {
+  const version = textVersion(state.leftVersionId);
+  $("#sourcePreview").textContent = version?.text || "暂无可送检正文。";
+}
+
+function reviewRunForVersion(version) {
+  if (!version) return null;
+  const reviewRuns = (state.currentRecord?.ai_runs || [])
+    .filter((run) => run.stage === "review")
+    .sort((a, b) => Number(b.id) - Number(a.id));
+  if (version.stage === "review") {
+    const directRun = reviewRuns.find((run) => Number(run.id) === Number(version.run_id));
+    if (directRun) return directRun;
+  }
+  return reviewRuns.find((run) => run.options?.source_version_id === version.id)
+    || reviewRuns.find((run) => !run.options?.source_version_id && run.source_text === version.text)
+    || null;
+}
+
+function syncReviewForSelectedVersion() {
+  const run = reviewRunForVersion(textVersion(state.leftVersionId));
+  renderReviewResult(run);
+  if (run) refreshVersionDiff();
+}
+
+function clearPostReviewDiff() {
+  state.diffRequestId += 1;
+  $("#postReviewDiff").setAttribute("aria-busy", "false");
+  $("#unifiedDiffText").textContent = "";
+  $("#diffStats").textContent = "等待检查结果";
+  setInlineStatus("#diffStatus", "", "neutral");
+}
+
+function renderUnifiedDiff(chunks) {
   return chunks.map((chunk) => {
-    const value = chunk[textKey] || "";
-    if (!value) return "";
-    const highlighted = side === "left"
-      ? chunk.type === "left_only" || chunk.type === "replace"
-      : chunk.type === "right_only" || chunk.type === "replace";
-    const className = highlighted ? (side === "left" ? "diff-added" : "diff-removed") : "diff-equal";
-    return `<span class="${className}">${escapeHtml(value)}</span>`;
+    if (chunk.type === "equal") {
+      return `<span class="diff-equal">${escapeHtml(chunk.left_text || chunk.right_text || "")}</span>`;
+    }
+    if (chunk.type === "left_only") {
+      return `<span class="diff-added">${escapeHtml(chunk.left_text || "")}</span>`;
+    }
+    if (chunk.type === "right_only") {
+      return `<span class="diff-removed">${escapeHtml(chunk.right_text || "")}</span>`;
+    }
+    return `<span class="diff-removed">${escapeHtml(chunk.right_text || "")}</span><span class="diff-added">${escapeHtml(chunk.left_text || "")}</span>`;
   }).join("");
+}
+
+function clearReviewEditDiff() {
+  window.clearTimeout(state.reviewEditDiffTimer);
+  state.reviewEditDiffTimer = null;
+  state.reviewEditDiffRequestId += 1;
+  const surface = $("#reviewEditDiffSurface");
+  if (!surface) return;
+  surface.setAttribute("aria-busy", "false");
+  $("#reviewEditDiffText").textContent = "";
+  $("#reviewEditDiffStats").textContent = "等待检查结果";
+  setInlineStatus("#reviewEditDiffStatus", "", "neutral");
+}
+
+function scheduleReviewEditDiff({ immediate = false } = {}) {
+  window.clearTimeout(state.reviewEditDiffTimer);
+  state.reviewEditDiffTimer = null;
+  state.reviewEditDiffRequestId += 1;
+  if (!state.currentRecord || !state.currentReview) {
+    clearReviewEditDiff();
+    return;
+  }
+  $("#reviewEditDiffSurface").setAttribute("aria-busy", "true");
+  setInlineStatus("#reviewEditDiffStatus", "正在同步本次修改…", "loading");
+  if (immediate) {
+    refreshReviewEditDiff();
+    return;
+  }
+  state.reviewEditDiffTimer = window.setTimeout(refreshReviewEditDiff, 250);
+}
+
+async function refreshReviewEditDiff() {
+  state.reviewEditDiffTimer = null;
+  const recordId = state.currentRecord?.id;
+  const runId = state.currentReview?.id;
+  if (!recordId || !runId) {
+    clearReviewEditDiff();
+    return;
+  }
+  const requestId = ++state.reviewEditDiffRequestId;
+  const surface = $("#reviewEditDiffSurface");
+  surface.setAttribute("aria-busy", "true");
+  try {
+    const result = await api(
+      `/api/transcriptions/${encodeURIComponent(recordId)}/ai/reviews/${encodeURIComponent(runId)}/diff`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: readReviewEditorText() }),
+      },
+    );
+    if (
+      requestId !== state.reviewEditDiffRequestId
+      || state.currentRecord?.id !== recordId
+      || Number(state.currentReview?.id) !== Number(runId)
+    ) return;
+    const chunks = Array.isArray(result.chunks) ? result.chunks : [];
+    $("#reviewEditDiffText").innerHTML = renderUnifiedDiff(chunks) || '<span class="diff-empty">空文本</span>';
+    if (result.identical) {
+      $("#reviewEditDiffStats").textContent = "内容一致";
+      setInlineStatus("#reviewEditDiffStatus", "与 AI 检查初稿一致。", "success");
+    } else {
+      const counts = result.counts || {};
+      $("#reviewEditDiffStats").textContent = `新增 ${Number(counts.added_chars) || 0} · 删除 ${Number(counts.removed_chars) || 0} · 修改 ${Number(counts.changed_chars) || 0}`;
+      setInlineStatus("#reviewEditDiffStatus", "已实时标出尚未保存的手动修改。", "success");
+    }
+  } catch (error) {
+    if (requestId !== state.reviewEditDiffRequestId || state.currentRecord?.id !== recordId) return;
+    setInlineStatus("#reviewEditDiffStatus", error.message, "error");
+    $("#reviewEditDiffStats").textContent = "Diff 更新失败";
+  } finally {
+    if (requestId === state.reviewEditDiffRequestId) surface.setAttribute("aria-busy", "false");
+  }
+}
+
+function syncReviewEditScroll(event) {
+  if (state.reviewEditScrollSync || window.matchMedia("(max-width: 720px)").matches) return;
+  const source = event.currentTarget;
+  const target = source.id === "reviewEditDiffText" ? $("#reviewEditor") : $("#reviewEditDiffText");
+  const sourceRange = source.scrollHeight - source.clientHeight;
+  const targetRange = target.scrollHeight - target.clientHeight;
+  if (sourceRange <= 0 || targetRange <= 0) return;
+  state.reviewEditScrollSync = true;
+  target.scrollTop = (source.scrollTop / sourceRange) * targetRange;
+  window.requestAnimationFrame(() => { state.reviewEditScrollSync = false; });
 }
 
 async function refreshVersionDiff() {
   const recordId = state.currentRecord?.id;
-  const leftVersion = textVersion(state.leftVersionId);
+  const reviewedVersion = state.currentReview?.id ? textVersion(`review:${state.currentReview.id}`) : null;
+  const leftVersion = reviewedVersion || textVersion(state.leftVersionId);
   const rightVersion = textVersion(state.rightVersionId);
+  if (!state.currentReview) {
+    clearPostReviewDiff();
+    return;
+  }
   if (!recordId || !leftVersion || !rightVersion) {
-    $("#leftDiffText").textContent = "暂无可对比版本。";
-    $("#rightDiffText").textContent = "暂无可对比版本。";
+    $("#unifiedDiffText").textContent = "暂无可对比版本。";
     $("#diffStats").textContent = "暂无版本";
     return;
   }
 
   const requestId = ++state.diffRequestId;
-  const diffSurface = $(".version-diff");
+  const diffSurface = $("#postReviewDiff");
   diffSurface.setAttribute("aria-busy", "true");
   setInlineStatus("#diffStatus", "正在计算版本差异…", "loading");
   try {
@@ -388,18 +679,16 @@ async function refreshVersionDiff() {
     });
     if (requestId !== state.diffRequestId || state.currentRecord?.id !== recordId) return;
     const chunks = Array.isArray(result.chunks) ? result.chunks : [];
-    $("#leftDiffText").innerHTML = renderDiffText(chunks, "left") || '<span class="diff-empty">空文本</span>';
-    $("#rightDiffText").innerHTML = renderDiffText(chunks, "right") || '<span class="diff-empty">空文本</span>';
+    $("#unifiedDiffText").innerHTML = renderUnifiedDiff(chunks) || '<span class="diff-empty">空文本</span>';
     if (result.identical) {
       $("#diffStats").textContent = "内容一致 · 0 处差异";
       setInlineStatus("#diffStatus", "两个版本内容一致。", "success");
     } else {
       const counts = result.counts || {};
       $("#diffStats").textContent = `新增 ${Number(counts.added_chars) || 0} 字 · 删除 ${Number(counts.removed_chars) || 0} 字 · 修改 ${Number(counts.changed_chars) || 0} 字`;
-      setInlineStatus("#diffStatus", "已按右侧基准标出左侧变化。", "success");
+      setInlineStatus("#diffStatus", "已在左侧统一标出相对对照版本的变化。", "success");
     }
-    $("#leftDiffText").scrollTop = 0;
-    $("#rightDiffText").scrollTop = 0;
+    $("#unifiedDiffText").scrollTop = 0;
   } catch (error) {
     if (requestId !== state.diffRequestId || state.currentRecord?.id !== recordId) return;
     setInlineStatus("#diffStatus", error.message, "error");
@@ -410,22 +699,15 @@ async function refreshVersionDiff() {
 }
 
 function handleVersionSelection(side) {
-  if (side === "left") state.leftVersionId = $("#leftVersionSelect").value;
-  else state.rightVersionId = $("#rightVersionSelect").value;
-  refreshVersionDiff();
+  if (side === "left") {
+    state.leftVersionId = $("#leftVersionSelect").value;
+    renderSourcePreview();
+    syncReviewForSelectedVersion();
+  } else {
+    state.rightVersionId = $("#rightVersionSelect").value;
+    refreshVersionDiff();
+  }
   updateAIAvailability();
-}
-
-function syncDiffScroll(event) {
-  if (state.diffScrollSync || window.matchMedia("(max-width: 720px)").matches) return;
-  const source = event.currentTarget;
-  const target = source.id === "leftDiffText" ? $("#rightDiffText") : $("#leftDiffText");
-  const sourceRange = source.scrollHeight - source.clientHeight;
-  const targetRange = target.scrollHeight - target.clientHeight;
-  if (sourceRange <= 0 || targetRange <= 0) return;
-  state.diffScrollSync = true;
-  target.scrollTop = (source.scrollTop / sourceRange) * targetRange;
-  requestAnimationFrame(() => { state.diffScrollSync = false; });
 }
 
 function hydrateAIWorkspace() {
@@ -446,7 +728,7 @@ function hydrateAIWorkspace() {
   $("#workingSource").textContent = `当前输入 · ${state.workingSource}`;
 
   renderOrganizedResult(organized);
-  renderReviewResult(workingRun?.stage === "review" ? review : null);
+  renderReviewResult(null);
   renderAnalysisResult(analysis);
 }
 
@@ -483,6 +765,10 @@ function renderReviewResult(run) {
     workspace.classList.add("hidden");
     $("#reviewEditor").innerHTML = "";
     $("#issueList").innerHTML = "";
+    clearPostReviewDiff();
+    clearReviewEditDiff();
+    setInlineStatus("#reviewActionStatus", "", "neutral");
+    updateReviewSaveUI();
     return;
   }
   workspace.classList.remove("hidden");
@@ -490,6 +776,9 @@ function renderReviewResult(run) {
   const issues = Array.isArray(run.result?.issues) ? run.result.issues : [];
   $("#reviewEditor").innerHTML = highlightedTextHtml(text, issues);
   renderIssueList();
+  setInlineStatus("#reviewActionStatus", "保存后可在“导出结果”中选择该 STEP 2 版本。", "neutral");
+  updateReviewSaveUI();
+  scheduleReviewEditDiff({ immediate: true });
 }
 
 function highlightedTextHtml(text, issues) {
@@ -544,6 +833,29 @@ function readReviewEditorText() {
   return $("#reviewEditor").innerText.replaceAll("\u00a0", " ").replace(/\n$/, "");
 }
 
+function reviewHasUnsavedChanges() {
+  if (!state.currentReview || $("#reviewWorkspace").classList.contains("hidden")) return false;
+  return readReviewEditorText() !== String(state.currentReview.result_text || "")
+    || state.resolvedIssueIds.size > 0;
+}
+
+function updateReviewSaveUI() {
+  const hasReview = Boolean(state.currentReview);
+  const isDirty = hasReview && reviewHasUnsavedChanges();
+  const saveState = $("#reviewSaveState");
+  saveState.dataset.state = isDirty ? "dirty" : "saved";
+  saveState.lastChild.textContent = isDirty ? "有未保存修改" : "已保存";
+  $("#saveReviewBtn").disabled = !hasReview || state.reviewSaveBusy || !isDirty;
+  updateExportFormatAvailability();
+}
+
+function setReviewSaveBusy(isBusy) {
+  state.reviewSaveBusy = isBusy;
+  $("#reviewEditor").setAttribute("aria-busy", String(isBusy));
+  $("#saveReviewBtn").textContent = isBusy ? "正在保存…" : "保存 STEP 2 结果";
+  updateReviewSaveUI();
+}
+
 function handleReviewEdit() {
   const editor = $("#reviewEditor");
   const issues = Array.isArray(state.currentReview?.result?.issues) ? state.currentReview.result.issues : [];
@@ -564,6 +876,8 @@ function handleReviewEdit() {
   editor.normalize();
   state.workingText = readReviewEditorText();
   renderIssueList();
+  updateReviewSaveUI();
+  scheduleReviewEditDiff();
 }
 
 function focusIssue(issueId) {
@@ -587,6 +901,8 @@ function applySuggestion(issueId) {
   $("#reviewEditor").normalize();
   state.workingText = readReviewEditorText();
   renderIssueList();
+  updateReviewSaveUI();
+  scheduleReviewEditDiff();
 }
 
 function renderAnalysisResult(run) {
@@ -811,7 +1127,10 @@ async function startReview() {
     const response = await api(`/api/transcriptions/${encodeURIComponent(state.currentRecord.id)}/ai/review`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: sourceText }),
+      body: JSON.stringify({
+        source_version_id: sourceVersion.id,
+        text: sourceText,
+      }),
     });
     state.currentRecord.ai_runs = [response.run, ...(state.currentRecord.ai_runs || [])];
     state.workingText = sourceText;
@@ -828,19 +1147,34 @@ async function startReview() {
 }
 
 async function saveReview() {
-  if (!state.currentRecord || !state.currentReview) return;
+  if (!state.currentRecord || !state.currentReview) return null;
   const text = readReviewEditorText();
-  $("#saveReviewBtn").disabled = true;
-  setInlineStatus("#reviewStatus", "正在保存检查修改…", "loading");
+  if (!text.trim()) {
+    setInlineStatus("#reviewActionStatus", "STEP 2 正文不能为空。", "error");
+    return null;
+  }
+  if (!reviewHasUnsavedChanges()) {
+    setInlineStatus(
+      "#reviewActionStatus",
+      "当前 STEP 2 结果已保存，可在“导出结果”中选择。",
+      "success",
+    );
+    return state.currentReview;
+  }
+  const recordId = state.currentRecord.id;
+  const runId = state.currentReview.id;
+  setReviewSaveBusy(true);
+  setInlineStatus("#reviewActionStatus", "正在保存 STEP 2 修改…", "loading");
   try {
     const response = await api(
-      `/api/transcriptions/${encodeURIComponent(state.currentRecord.id)}/ai/reviews/${state.currentReview.id}`,
+      `/api/transcriptions/${encodeURIComponent(recordId)}/ai/reviews/${encodeURIComponent(runId)}`,
       {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text, resolved_issue_ids: Array.from(state.resolvedIssueIds) }),
       },
     );
+    if (state.currentRecord?.id !== recordId || Number(state.currentReview?.id) !== Number(runId)) return null;
     state.currentRecord.ai_runs = [
       response.run,
       ...(state.currentRecord.ai_runs || []).filter((run) => run.id !== response.run.id),
@@ -850,11 +1184,17 @@ async function saveReview() {
     $("#workingSource").textContent = `当前输入 · ${state.workingSource}`;
     renderReviewResult(response.run);
     await loadTextVersions({ preferLeftId: `review:${response.run.id}` });
-    setInlineStatus("#reviewStatus", "检查修改已保存。", "success");
+    setInlineStatus(
+      "#reviewActionStatus",
+      "STEP 2 人工修改结果已明确保存，可前往“导出结果”选择该版本。",
+      "success",
+    );
+    return response.run;
   } catch (error) {
-    setInlineStatus("#reviewStatus", error.message, "error");
+    setInlineStatus("#reviewActionStatus", error.message, "error");
+    return null;
   } finally {
-    $("#saveReviewBtn").disabled = false;
+    setReviewSaveBusy(false);
   }
 }
 
@@ -879,9 +1219,236 @@ async function analyzeContent() {
   }
 }
 
+function setExportBusy(isBusy) {
+  state.exportBusy = isBusy;
+  $$('[data-export], #exportAllBtn').forEach((button) => { button.disabled = isBusy; });
+  $("#confirmExportBtn").disabled = isBusy;
+  $("#confirmDeleteExportBtn").disabled = isBusy;
+  $("#exportConfirmDialog").setAttribute("aria-busy", String(isBusy));
+  $("#deleteExportDialog").setAttribute("aria-busy", String(isBusy));
+  updateExportSelectionUI();
+  updateReviewSaveUI();
+}
+
+function openExportConfirmation(format, { source = "record", runId = null } = {}) {
+  if (!state.currentRecord) return setMessage("暂无可导出记录。", true);
+  if (state.exportBusy) return;
+  const isAll = format === "all";
+  const isReview = source === "review";
+  const formatLabel = EXPORT_FORMAT_LABELS[format];
+  if (!isAll && !formatLabel) return setMessage("导出格式不支持。", true);
+  const reviewRun = isReview
+    ? (state.currentRecord.ai_runs || []).find(
+      (run) => run.stage === "review" && Number(run.id) === Number(runId),
+    )
+    : null;
+  if (isReview && (!reviewRun || isAll || !REVIEW_EXPORT_FORMATS.has(format))) {
+    return setInlineStatus("#exportBatchStatus", "所选 STEP 2 版本或导出格式已不可用，请重新选择。", "error");
+  }
+  state.pendingExport = { format, recordId: state.currentRecord.id, source, runId };
+  $("#exportConfirmTitle").textContent = isAll
+    ? "生成全部导出文件？"
+    : isReview ? `导出 STEP 2 ${formatLabel}？` : `生成 ${formatLabel}？`;
+  $("#exportConfirmDescription").textContent = isAll
+    ? "确认后将生成六种格式文件，并额外打包为一个 ZIP。"
+    : isReview
+      ? `确认后将从已保存的 STEP 2 版本 #${runId} 生成一个 ${formatLabel}。`
+      : `确认后将从当前识别结果生成一个 ${formatLabel}。`;
+  $("#exportConfirmRecord").textContent = state.currentRecord.original_filename || state.currentRecord.id;
+  $("#exportConfirmScope").textContent = isAll
+    ? "TXT、Markdown、PDF、SRT、VTT、JSON 与 ZIP"
+    : isReview ? `STEP 2 人工修改结果 · ${formatLabel}` : formatLabel;
+  $("#confirmExportBtn").textContent = isAll
+    ? "确认生成全部文件"
+    : `确认生成 ${formatLabel}`;
+  const dialog = $("#exportConfirmDialog");
+  if (!dialog.open) dialog.showModal();
+  window.requestAnimationFrame(() => $("#confirmExportBtn").focus());
+}
+
+function closeExportConfirmation() {
+  const dialog = $("#exportConfirmDialog");
+  if (dialog.open) dialog.close();
+  state.pendingExport = null;
+}
+
+async function confirmExportGeneration() {
+  const pending = state.pendingExport;
+  if (!pending || state.exportBusy) return;
+  if (!state.currentRecord || state.currentRecord.id !== pending.recordId) {
+    closeExportConfirmation();
+    return setMessage("当前记录已变化，请重新选择导出格式。", true);
+  }
+  closeExportConfirmation();
+  if (pending.source === "review") await exportReviewFormat(pending);
+  else if (pending.format === "all") await exportAll();
+  else await exportFormat(pending.format);
+}
+
+function openSelectedExportConfirmation(format) {
+  const selection = selectedExportSource();
+  openExportConfirmation(format, {
+    source: selection.source,
+    runId: selection.runId,
+  });
+}
+
+async function downloadResponseError(response) {
+  let detail = `请求失败：${response.status}`;
+  try {
+    const data = await response.json();
+    detail = data.detail || detail;
+  } catch (_) {
+    detail = await response.text();
+  }
+  return detail;
+}
+
+async function downloadSelectedExports() {
+  const files = selectedExportFiles();
+  if (!state.currentRecord || !files.length) {
+    return setInlineStatus("#exportBatchStatus", "请先选择需要下载的文件。", "error");
+  }
+  const recordId = state.currentRecord.id;
+  const fileIds = files.map((file) => Number(file.id));
+  setExportBusy(true);
+  setInlineStatus("#exportBatchStatus", `正在打包 ${files.length} 个文件…`, "loading");
+  try {
+    const response = await fetch(
+      `/api/transcriptions/${encodeURIComponent(recordId)}/exports/download`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ file_ids: fileIds }),
+      },
+    );
+    if (!response.ok) throw new Error(await downloadResponseError(response));
+    const blob = await response.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = objectUrl;
+    link.download = `${recordId}-selected-exports.zip`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    setInlineStatus("#exportBatchStatus", `已打包下载 ${files.length} 个文件。`, "success");
+  } catch (error) {
+    setInlineStatus("#exportBatchStatus", error.message, "error");
+  } finally {
+    setExportBusy(false);
+  }
+}
+
+function openDeleteExportConfirmation(fileIds) {
+  if (!state.currentRecord || state.exportBusy) return;
+  const requestedIds = new Set(fileIds.map(Number));
+  const files = (state.currentRecord.export_files || []).filter((file) => requestedIds.has(Number(file.id)));
+  if (!files.length) return setInlineStatus("#exportBatchStatus", "请选择需要删除的文件。", "error");
+  state.pendingExportDeletion = {
+    recordId: state.currentRecord.id,
+    fileIds: files.map((file) => Number(file.id)),
+  };
+  $("#deleteExportTitle").textContent = files.length === 1
+    ? `删除 ${files[0].filename}？`
+    : `删除选中的 ${files.length} 个文件？`;
+  $("#deleteExportDescription").textContent = files.length === 1
+    ? "文件将从磁盘和导出列表中永久删除，此操作无法撤销。"
+    : "所选文件将从磁盘和导出列表中永久删除，此操作无法撤销。";
+  $("#deleteExportList").innerHTML = files.map((file) => {
+    const presentation = exportFilePresentation(file);
+    return `<li><strong>${escapeHtml(file.filename)}</strong><span>${escapeHtml(presentation.source)}</span></li>`;
+  }).join("");
+  $("#confirmDeleteExportBtn").textContent = files.length === 1 ? "确认删除文件" : `确认删除 ${files.length} 个文件`;
+  const dialog = $("#deleteExportDialog");
+  if (!dialog.open) dialog.showModal();
+  window.requestAnimationFrame(() => $("#cancelDeleteExportBtn").focus());
+}
+
+function closeDeleteExportConfirmation() {
+  const dialog = $("#deleteExportDialog");
+  if (dialog.open) dialog.close();
+  state.pendingExportDeletion = null;
+}
+
+async function confirmDeleteExports() {
+  const pending = state.pendingExportDeletion;
+  if (!pending || state.exportBusy) return;
+  if (!state.currentRecord || state.currentRecord.id !== pending.recordId) {
+    closeDeleteExportConfirmation();
+    return setInlineStatus("#exportBatchStatus", "当前记录已变化，请重新选择文件。", "error");
+  }
+  const fileIds = [...pending.fileIds];
+  closeDeleteExportConfirmation();
+  setExportBusy(true);
+  setInlineStatus("#exportBatchStatus", `正在删除 ${fileIds.length} 个文件…`, "loading");
+  try {
+    const response = await api(
+      `/api/transcriptions/${encodeURIComponent(state.currentRecord.id)}/exports/delete`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ file_ids: fileIds }),
+      },
+    );
+    state.currentRecord = response.record;
+    fileIds.forEach((fileId) => state.selectedExportIds.delete(Number(fileId)));
+    renderCurrentRecord();
+    activateMainTab("exports");
+    setInlineStatus("#exportBatchStatus", `已删除 ${fileIds.length} 个文件。`, "success");
+  } catch (error) {
+    setInlineStatus("#exportBatchStatus", error.message, "error");
+  } finally {
+    setExportBusy(false);
+  }
+}
+
+async function exportReviewFormat(pending) {
+  const reviewRun = (state.currentRecord?.ai_runs || []).find(
+    (run) => run.stage === "review" && Number(run.id) === Number(pending.runId),
+  );
+  if (!state.currentRecord || state.currentRecord.id !== pending.recordId || !reviewRun) {
+    return setInlineStatus("#exportBatchStatus", "所选 STEP 2 已保存版本不再可用，请重新选择。", "error");
+  }
+  const recordId = state.currentRecord.id;
+  const runId = reviewRun.id;
+  const formatLabel = EXPORT_FORMAT_LABELS[pending.format] || pending.format.toUpperCase();
+  setExportBusy(true);
+  setInlineStatus("#exportBatchStatus", `正在从 STEP 2 已保存版本 #${runId} 生成 ${formatLabel}…`, "loading");
+  try {
+    const result = await api(
+      `/api/transcriptions/${encodeURIComponent(recordId)}/ai/reviews/${encodeURIComponent(runId)}/exports`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ format: pending.format }),
+      },
+    );
+    if (state.currentRecord?.id !== recordId) return;
+    state.currentRecord = result.record;
+    state.selectedExportIds.add(Number(result.export_file.id));
+    renderExports();
+    renderExportSourceOptions();
+    renderInfo();
+    renderHistory();
+    setInlineStatus(
+      "#exportBatchStatus",
+      `STEP 2 ${formatLabel} 已生成并选中，可直接下载。`,
+      "success",
+    );
+    setMessage(`STEP 2 已保存版本 #${runId} 已导出。`);
+  } catch (error) {
+    setInlineStatus("#exportBatchStatus", error.message, "error");
+    setMessage(error.message, true);
+  } finally {
+    setExportBusy(false);
+  }
+}
+
 async function exportFormat(format) {
   if (!state.currentRecord) return setMessage("暂无可导出记录。", true);
-  setMessage("正在导出…");
+  setExportBusy(true);
+  setMessage(`正在生成 ${EXPORT_FORMAT_LABELS[format] || format.toUpperCase()}…`);
   try {
     const result = await api(`/api/transcriptions/${encodeURIComponent(state.currentRecord.id)}/exports`, {
       method: "POST",
@@ -894,11 +1461,14 @@ async function exportFormat(format) {
     setMessage("导出完成。");
   } catch (error) {
     setMessage(error.message, true);
+  } finally {
+    setExportBusy(false);
   }
 }
 
 async function exportAll() {
   if (!state.currentRecord) return setMessage("暂无可导出记录。", true);
+  setExportBusy(true);
   setMessage("正在生成全部格式和 ZIP…");
   try {
     const result = await api(`/api/transcriptions/${encodeURIComponent(state.currentRecord.id)}/exports/all`, { method: "POST" });
@@ -908,6 +1478,8 @@ async function exportAll() {
     setMessage("全部导出完成。");
   } catch (error) {
     setMessage(error.message, true);
+  } finally {
+    setExportBusy(false);
   }
 }
 
@@ -931,24 +1503,67 @@ function setupEvents() {
   $("#refreshBtn").addEventListener("click", () => loadRecords().catch((error) => setMessage(error.message, true)));
   $("#saveTextBtn").addEventListener("click", () => saveCurrentRecord(false));
   $("#saveSegmentsBtn").addEventListener("click", () => saveCurrentRecord(true));
-  $("#exportAllBtn").addEventListener("click", exportAll);
-  $$("[data-export]").forEach((button) => button.addEventListener("click", () => exportFormat(button.dataset.export)));
+  $("#exportAllBtn").addEventListener("click", () => openSelectedExportConfirmation("all"));
+  $$("[data-export]").forEach((button) => button.addEventListener("click", () => openSelectedExportConfirmation(button.dataset.export)));
+  $("#exportSourceSelect").addEventListener("change", handleExportSourceChange);
+  $("#confirmExportBtn").addEventListener("click", confirmExportGeneration);
+  $("#cancelExportBtn").addEventListener("click", closeExportConfirmation);
+  $("#selectAllExports").addEventListener("change", (event) => toggleAllExports(event.target.checked));
+  $("#downloadSelectedExportsBtn").addEventListener("click", downloadSelectedExports);
+  $("#deleteSelectedExportsBtn").addEventListener("click", () => {
+    openDeleteExportConfirmation(Array.from(state.selectedExportIds));
+  });
+  $("#exportList").addEventListener("change", (event) => {
+    const checkbox = event.target.closest("[data-export-select]");
+    if (checkbox) handleExportSelectionChange(checkbox);
+  });
+  $("#exportConfirmDialog").addEventListener("cancel", (event) => {
+    event.preventDefault();
+    closeExportConfirmation();
+  });
+  $("#exportConfirmDialog").addEventListener("click", (event) => {
+    if (event.target === event.currentTarget) closeExportConfirmation();
+  });
+  $("#confirmDeleteExportBtn").addEventListener("click", confirmDeleteExports);
+  $("#cancelDeleteExportBtn").addEventListener("click", closeDeleteExportConfirmation);
+  $("#deleteExportDialog").addEventListener("cancel", (event) => {
+    event.preventDefault();
+    closeDeleteExportConfirmation();
+  });
+  $("#deleteExportDialog").addEventListener("click", (event) => {
+    if (event.target === event.currentTarget) closeDeleteExportConfirmation();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    if ($("#deleteExportDialog").open) {
+      event.preventDefault();
+      closeDeleteExportConfirmation();
+    } else if ($("#exportConfirmDialog").open) {
+      event.preventDefault();
+      closeExportConfirmation();
+    }
+  });
   $$(".tab").forEach((button) => button.addEventListener("click", () => activateMainTab(button.dataset.tab)));
   $$(".workflow-step").forEach((button) => button.addEventListener("click", () => activateAIStage(button.dataset.aiStage)));
 
   $("#organizeBtn").addEventListener("click", organizeContent);
   $("#reviewBtn").addEventListener("click", startReview);
-  $("#saveReviewBtn").addEventListener("click", saveReview);
+  $("#saveReviewBtn").addEventListener("click", () => saveReview());
   $("#analyzeBtn").addEventListener("click", analyzeContent);
   $("#copyOrganizedBtn").addEventListener("click", () => copyText($("#organizedPreview").value));
   $("#reviewEditor").addEventListener("input", handleReviewEdit);
+  $("#reviewEditor").addEventListener("scroll", syncReviewEditScroll, { passive: true });
+  $("#reviewEditDiffText").addEventListener("scroll", syncReviewEditScroll, { passive: true });
   $("#leftVersionSelect").addEventListener("change", () => handleVersionSelection("left"));
   $("#rightVersionSelect").addEventListener("change", () => handleVersionSelection("right"));
-  $("#leftDiffText").addEventListener("scroll", syncDiffScroll, { passive: true });
-  $("#rightDiffText").addEventListener("scroll", syncDiffScroll, { passive: true });
   window.addEventListener("focus", () => loadHealth({ silent: true }));
 
   document.body.addEventListener("click", async (event) => {
+    const deleteExportButton = event.target.closest("[data-delete-export]");
+    if (deleteExportButton) {
+      openDeleteExportConfirmation([Number(deleteExportButton.dataset.deleteExport)]);
+      return;
+    }
     const copyButton = event.target.closest("[data-copy]");
     if (copyButton) {
       await copyText(copyButton.dataset.copy).catch((error) => setMessage(error.message, true));
